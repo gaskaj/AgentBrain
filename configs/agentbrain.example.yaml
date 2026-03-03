@@ -1,0 +1,33 @@
+agent:
+  log_level: info
+  log_format: json
+  health_addr: ":8080"
+  schedule: "@every 1h"
+  timeout: 30m
+
+storage:
+  bucket: "${S3_BUCKET:-my-datalake-bucket}"
+  region: "${AWS_REGION:-us-east-1}"
+  # endpoint: "http://localhost:4566"  # Uncomment for LocalStack
+  # prefix: "agentbrain"              # Optional key prefix
+
+sources:
+  salesforce_prod:
+    type: salesforce
+    enabled: true
+    schedule: "@every 1h"
+    concurrency: 4
+    batch_size: 10000
+    objects:
+      - Account
+      - Contact
+      - Opportunity
+      - Lead
+      - Case
+    auth:
+      client_id: "${SF_CLIENT_ID}"
+      client_secret: "${SF_CLIENT_SECRET}"
+      username: "${SF_USERNAME}"
+      password: "${SF_PASSWORD}"
+      security_token: "${SF_SECURITY_TOKEN}"
+      login_url: "https://login.salesforce.com"

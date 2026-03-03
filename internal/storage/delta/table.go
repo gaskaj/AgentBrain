@@ -1,0 +1,146 @@
+package delta
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+)
+
+// Snapshot represents the state of a Delta table at a specific version.
+type Snapshot struct {
+	Version  int64
+	Protocol *Protocol
+	Metadata *Metadata
+	Files    map[string]*Add // active files keyed by path
+}
+
+// DeltaTable manages a Delta Lake table.
+type DeltaTable struct {
+	log    *TransactionLog
+	source string
+	object string
+	logger *slog.Logger
+}
+
+// NewDeltaTable creates a new DeltaTable manager.
+func NewDeltaTable(store S3Store, source, object, logPrefix string, logger *slog.Logger) *DeltaTable {
+	return &DeltaTable{
+		log:    NewTransactionLog(store, logPrefix),
+		source: source,
+		object: object,
+		logger: logger,
+	}
+}
+
+// Initialize creates the initial version (0) with protocol and metadata.
+func (t *DeltaTable) Initialize(ctx context.Context, schemaString string) error {
+	exists, err := t.log.LatestVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("check existing table: %w", err)
+	}
+	if exists >= 0 {
+		return nil // already initialized
+	}
+
+	tableID := fmt.Sprintf("%s_%s", t.source, t.object)
+	actions := []Action{
+		NewProtocolAction(),
+		NewMetadataAction(tableID, t.object, schemaString),
+		NewCommitInfoAction("CREATE TABLE", -1, true),
+	}
+
+	if err := t.log.WriteVersion(ctx, 0, actions); err != nil {
+		return fmt.Errorf("initialize table: %w", err)
+	}
+
+	t.logger.Info("initialized delta table", "source", t.source, "object", t.object)
+	return nil
+}
+
+// Commit appends a new version to the Delta log with the given actions.
+func (t *DeltaTable) Commit(ctx context.Context, actions []Action, operation string) (int64, error) {
+	latest, err := t.log.LatestVersion(ctx)
+	if err != nil {
+		return -1, fmt.Errorf("get latest version: %w", err)
+	}
+
+	newVersion := latest + 1
+
+	commitInfo := NewCommitInfoAction(operation, latest, true)
+	allActions := append(actions, commitInfo)
+
+	if err := t.log.WriteVersion(ctx, newVersion, allActions); err != nil {
+		return -1, fmt.Errorf("commit version %d: %w", newVersion, err)
+	}
+
+	t.logger.Info("committed delta version",
+		"source", t.source,
+		"object", t.object,
+		"version", newVersion,
+		"actions", len(actions),
+	)
+
+	return newVersion, nil
+}
+
+// Snapshot replays the transaction log up to the given version and returns the table state.
+// If version is -1, it returns the latest snapshot.
+func (t *DeltaTable) Snapshot(ctx context.Context, version int64) (*Snapshot, error) {
+	if version == -1 {
+		latest, err := t.log.LatestVersion(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if latest < 0 {
+			return nil, fmt.Errorf("table has no versions")
+		}
+		version = latest
+	}
+
+	snap := &Snapshot{
+		Version: version,
+		Files:   make(map[string]*Add),
+	}
+
+	for v := int64(0); v <= version; v++ {
+		actions, err := t.log.ReadVersion(ctx, v)
+		if err != nil {
+			return nil, fmt.Errorf("read version %d: %w", v, err)
+		}
+
+		for i := range actions {
+			a := &actions[i]
+			switch {
+			case a.Protocol != nil:
+				snap.Protocol = a.Protocol
+			case a.MetaData != nil:
+				snap.Metadata = a.MetaData
+			case a.Add != nil:
+				snap.Files[a.Add.Path] = a.Add
+			case a.Remove != nil:
+				delete(snap.Files, a.Remove.Path)
+			}
+		}
+	}
+
+	return snap, nil
+}
+
+// LatestVersion returns the latest version, or -1 if none.
+func (t *DeltaTable) LatestVersion(ctx context.Context) (int64, error) {
+	return t.log.LatestVersion(ctx)
+}
+
+// ActiveFiles returns the set of currently active file paths at the latest version.
+func (t *DeltaTable) ActiveFiles(ctx context.Context) ([]string, error) {
+	snap, err := t.Snapshot(ctx, -1)
+	if err != nil {
+		return nil, err
+	}
+
+	files := make([]string, 0, len(snap.Files))
+	for path := range snap.Files {
+		files = append(files, path)
+	}
+	return files, nil
+}
