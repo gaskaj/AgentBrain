@@ -75,3 +75,8 @@ func (h *HealthServer) handleReady(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 }
+
+// GetHealthStatus returns the current readiness status
+func (h *HealthServer) GetHealthStatus() bool {
+	return h.ready.Load()
+}

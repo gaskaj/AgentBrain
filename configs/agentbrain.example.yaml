@@ -31,3 +31,60 @@ sources:
       password: "${SF_PASSWORD}"
       security_token: "${SF_SECURITY_TOKEN}"
       login_url: "https://login.salesforce.com"
+
+monitoring:
+  enabled: false  # Disabled by default for backward compatibility
+  check_interval: "5m"
+  alert_cooldown: "30m"
+  
+  rules:
+    agent_failure_rate:
+      enabled: true
+      threshold: 0.10  # 10% failure rate
+      window: "1h"
+      severity: "warning"
+    
+    workflow_completion:
+      enabled: true
+      min_success_rate: 0.80  # 80% success rate
+      window: "6h"
+      severity: "critical"
+    
+    disk_usage:
+      enabled: true
+      warning_threshold: 80.0   # 80%
+      critical_threshold: 90.0  # 90%
+      severity: "warning"
+    
+    memory_usage:
+      enabled: true
+      warning_threshold: 80.0   # 80%
+      critical_threshold: 90.0  # 90%
+      severity: "warning"
+    
+    api_response_time:
+      enabled: true
+      warning_threshold: "5s"
+      critical_threshold: "10s"
+      severity: "warning"
+  
+  notifications:
+    slack:
+      enabled: false
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+      channel: "#dev-agents"
+    
+    email:
+      enabled: false
+      smtp_host: "${SMTP_HOST:-smtp.gmail.com}"
+      smtp_port: 587
+      username: "${SMTP_USERNAME}"
+      password: "${SMTP_PASSWORD}"
+      from: "${EMAIL_FROM:-noreply@example.com}"
+      recipients:
+        - "team@example.com"
+    
+    webhook:
+      enabled: false
+      url: "${ALERT_WEBHOOK_URL}"
+      method: "POST"
