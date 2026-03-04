@@ -28,6 +28,21 @@ func SetupLogging(level, format string) *slog.Logger {
 	return logger
 }
 
+// GetMonitoringLogger returns a logger specifically for monitoring components
+func GetMonitoringLogger() *slog.Logger {
+	return slog.With("component", "monitoring")
+}
+
+// GetHealthLogger returns a logger specifically for health check operations
+func GetHealthLogger() *slog.Logger {
+	return slog.With("component", "health")
+}
+
+// GetAlertingLogger returns a logger specifically for alerting operations
+func GetAlertingLogger() *slog.Logger {
+	return slog.With("component", "alerting")
+}
+
 func parseLevel(s string) slog.Level {
 	switch strings.ToLower(s) {
 	case "debug":

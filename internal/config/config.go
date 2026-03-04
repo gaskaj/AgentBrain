@@ -7,13 +7,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentbrain/agentbrain/internal/monitoring"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Agent   AgentConfig              `yaml:"agent"`
-	Storage StorageConfig            `yaml:"storage"`
-	Sources map[string]*SourceConfig `yaml:"sources"`
+	Agent      AgentConfig                      `yaml:"agent"`
+	Storage    StorageConfig                    `yaml:"storage"`
+	Sources    map[string]*SourceConfig         `yaml:"sources"`
+	Monitoring monitoring.MonitoringConfig     `yaml:"monitoring"`
 }
 
 type AgentConfig struct {
@@ -100,6 +102,17 @@ func setDefaults(cfg *Config) {
 		cfg.Agent.Timeout = 30 * time.Minute
 	}
 
+	// Set monitoring defaults
+	if cfg.Monitoring.CheckInterval == 0 {
+		cfg.Monitoring.CheckInterval = 5 * time.Minute
+	}
+	if cfg.Monitoring.AlertCooldown == 0 {
+		cfg.Monitoring.AlertCooldown = 30 * time.Minute
+	}
+
+	// Set default rule configurations
+	setRuleDefaults(&cfg.Monitoring.Rules)
+
 	for _, src := range cfg.Sources {
 		if src.Concurrency <= 0 {
 			src.Concurrency = 4
@@ -107,6 +120,63 @@ func setDefaults(cfg *Config) {
 		if src.BatchSize <= 0 {
 			src.BatchSize = 10000
 		}
+	}
+}
+
+func setRuleDefaults(rules *monitoring.RulesConfig) {
+	// Agent failure rate rule defaults
+	if rules.AgentFailureRate.Threshold == 0 {
+		rules.AgentFailureRate.Threshold = 0.10 // 10%
+	}
+	if rules.AgentFailureRate.Window == 0 {
+		rules.AgentFailureRate.Window = 1 * time.Hour
+	}
+	if rules.AgentFailureRate.Severity == "" {
+		rules.AgentFailureRate.Severity = "warning"
+	}
+
+	// Workflow completion rule defaults
+	if rules.WorkflowCompletion.MinSuccessRate == 0 {
+		rules.WorkflowCompletion.MinSuccessRate = 0.80 // 80%
+	}
+	if rules.WorkflowCompletion.Window == 0 {
+		rules.WorkflowCompletion.Window = 6 * time.Hour
+	}
+	if rules.WorkflowCompletion.Severity == "" {
+		rules.WorkflowCompletion.Severity = "critical"
+	}
+
+	// Disk usage rule defaults
+	if rules.DiskUsage.WarningThreshold == 0 {
+		rules.DiskUsage.WarningThreshold = 80.0 // 80%
+	}
+	if rules.DiskUsage.CriticalThreshold == 0 {
+		rules.DiskUsage.CriticalThreshold = 90.0 // 90%
+	}
+	if rules.DiskUsage.Severity == "" {
+		rules.DiskUsage.Severity = "warning"
+	}
+
+	// Memory usage rule defaults
+	if rules.MemoryUsage.WarningThreshold == 0 {
+		rules.MemoryUsage.WarningThreshold = 80.0 // 80%
+	}
+	if rules.MemoryUsage.CriticalThreshold == 0 {
+		rules.MemoryUsage.CriticalThreshold = 90.0 // 90%
+	}
+	if rules.MemoryUsage.Severity == "" {
+		rules.MemoryUsage.Severity = "warning"
+	}
+
+	// API response time rule defaults
+	if rules.APIResponseTime.WarningThreshold == 0 {
+		rules.APIResponseTime.WarningThreshold = 5 * time.Second
+	}
+	if rules.APIResponseTime.CriticalThreshold == 0 {
+		rules.APIResponseTime.CriticalThreshold = 10 * time.Second
+	}
+	if rules.APIResponseTime.Severity == "" {
+		rules.APIResponseTime.Severity = "warning"
 	}
 }
 
@@ -127,3 +197,5 @@ func validate(cfg *Config) error {
 	}
 	return nil
 }
+
+
