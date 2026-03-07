@@ -1,0 +1,88 @@
+# AgentBrain configuration with backup and disaster recovery enabled
+
+agent:
+  log_level: info
+  log_format: json
+  health_addr: ":8080"
+  schedule: "@every 1h"
+  timeout: 30m
+
+storage:
+  bucket: "my-data-lake"
+  region: "us-east-1"
+  prefix: "agentbrain/v1"
+
+# Backup and disaster recovery configuration
+backup:
+  enabled: true
+  destination_bucket: "my-backup-bucket"
+  destination_region: "us-west-2"          # Cross-region for disaster recovery
+  schedule: "@daily"                       # Daily automated backups
+  retention_days: 30                       # Keep backups for 30 days
+  cross_region: true                       # Enable cross-region replication
+  encryption_key: "${BACKUP_ENCRYPTION_KEY}"
+  validation_mode: "checksum"              # Validate backup integrity
+  concurrent_uploads: 8                    # Parallel uploads for performance
+  chunk_size_mb: 128                      # Large chunks for big files
+
+sources:
+  salesforce_prod:
+    type: salesforce
+    enabled: true
+    schedule: "@every 1h"
+    concurrency: 4
+    batch_size: 25000
+    objects:
+      - Account
+      - Contact
+      - Opportunity
+      - Lead
+      - Case
+    auth:
+      client_id: "${SF_CLIENT_ID}"
+      client_secret: "${SF_CLIENT_SECRET}"
+      username: "${SF_USERNAME}"
+      password: "${SF_PASSWORD}"
+      security_token: "${SF_SECURITY_TOKEN}"
+    checkpoint:
+      frequency: 10
+      retention_days: 30
+      validation_enabled: true
+      compaction_enabled: true
+
+monitoring:
+  enabled: true
+  check_interval: 5m
+  alert_cooldown: 30m
+  
+  # Notification channels
+  email:
+    enabled: true
+    smtp_host: "smtp.company.com"
+    smtp_port: 587
+    username: "${SMTP_USERNAME}"
+    password: "${SMTP_PASSWORD}" 
+    from: "agentbrain@company.com"
+    recipients:
+      - "admin@company.com"
+      - "ops-team@company.com"
+  
+  # Monitoring rules
+  rules:
+    agent_failure_rate:
+      enabled: true
+      threshold: 0.10
+      window: 1h
+      severity: "warning"
+    
+    workflow_completion:
+      enabled: true
+      min_success_rate: 0.90
+      window: 6h
+      severity: "critical"
+    
+    disk_usage:
+      enabled: true
+      warning_threshold: 80.0
+      critical_threshold: 90.0
+      severity: "warning"

@@ -55,6 +55,19 @@ sources:
       client_secret: "..."
     options:                 # Connector-specific options
       key: "value"
+
+# Backup and disaster recovery settings (optional)
+backup:
+  enabled: false             # Enable/disable backup system
+  destination_bucket: ""     # S3 bucket for backup storage
+  destination_region: ""     # AWS region for backup bucket  
+  schedule: "@daily"         # Automated backup schedule
+  retention_days: 30         # Days to retain backups
+  cross_region: false        # Enable cross-region replication
+  encryption_key: ""         # KMS key ID for backup encryption
+  validation_mode: "checksum" # Validation mode: checksum, full, none
+  concurrent_uploads: 4      # Concurrent file uploads during backup
+  chunk_size_mb: 64         # File chunk size for large uploads
 ```
 
 ## Section Details
@@ -120,6 +133,25 @@ sources:
 | `size_threshold_mb` | int64 | `128` | Data volume threshold for adaptive mode |
 
 For detailed guidance on checkpoint configuration, see [Checkpoint Management Guide](checkpoint-management.md).
+
+### backup
+
+The backup system provides comprehensive data protection for Delta Lake tables. All backup settings are optional when `enabled` is `false`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Enable or disable the backup system |
+| `destination_bucket` | string | - | S3 bucket for storing backups. **Required when enabled.** |
+| `destination_region` | string | - | AWS region for the backup bucket. **Required when enabled.** |
+| `schedule` | string | `@daily` | Cron expression for automated backup scheduling |
+| `retention_days` | int | `30` | Number of days to retain backups before deletion |
+| `cross_region` | bool | `false` | Enable cross-region replication for disaster recovery |
+| `encryption_key` | string | - | KMS key ID for encrypting backup data |
+| `validation_mode` | string | `checksum` | Backup validation mode: `checksum`, `full`, or `none` |
+| `concurrent_uploads` | int | `4` | Number of concurrent file uploads during backup operations |
+| `chunk_size_mb` | int | `64` | Chunk size in MB for uploading large files |
+
+For detailed backup configuration and usage, see [Backup and Disaster Recovery Guide](backup-recovery.md).
 
 ### Salesforce Auth Keys
 

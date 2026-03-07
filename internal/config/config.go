@@ -16,6 +16,7 @@ type Config struct {
 	Storage    StorageConfig                    `yaml:"storage"`
 	Sources    map[string]*SourceConfig         `yaml:"sources"`
 	Monitoring monitoring.MonitoringConfig     `yaml:"monitoring"`
+	Backup     *BackupConfig                    `yaml:"backup,omitempty"`
 }
 
 type AgentConfig struct {
@@ -53,6 +54,19 @@ type CheckpointConfig struct {
 	CompactionEnabled bool   `yaml:"compaction_enabled"`
 	SizeThresholdMB   int64  `yaml:"size_threshold_mb"`
 	AdaptiveMode      bool   `yaml:"adaptive_mode"`
+}
+
+type BackupConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	DestinationBucket string `yaml:"destination_bucket"`
+	DestinationRegion string `yaml:"destination_region"`
+	Schedule          string `yaml:"schedule"`
+	RetentionDays     int    `yaml:"retention_days"`
+	CrossRegion       bool   `yaml:"cross_region"`
+	EncryptionKey     string `yaml:"encryption_key"`
+	ValidationMode    string `yaml:"validation_mode"` // "checksum", "full", "none"
+	ConcurrentUploads int    `yaml:"concurrent_uploads"`
+	ChunkSizeMB       int    `yaml:"chunk_size_mb"`
 }
 
 func Load(path string) (*Config, error) {
@@ -158,6 +172,11 @@ func setDefaults(cfg *Config) {
 			setCheckpointDefaults(src.Checkpoint)
 		}
 	}
+
+	// Set backup defaults if backup config is provided
+	if cfg.Backup != nil {
+		setBackupDefaults(cfg.Backup)
+	}
 }
 
 func setCheckpointDefaults(cp *CheckpointConfig) {
@@ -172,6 +191,24 @@ func setCheckpointDefaults(cp *CheckpointConfig) {
 	}
 	if cp.SizeThresholdMB <= 0 {
 		cp.SizeThresholdMB = 128
+	}
+}
+
+func setBackupDefaults(bp *BackupConfig) {
+	if bp.Schedule == "" {
+		bp.Schedule = "@daily" // Daily backups by default
+	}
+	if bp.RetentionDays <= 0 {
+		bp.RetentionDays = 30 // 30 days retention
+	}
+	if bp.ValidationMode == "" {
+		bp.ValidationMode = "checksum" // Default to checksum validation
+	}
+	if bp.ConcurrentUploads <= 0 {
+		bp.ConcurrentUploads = 4 // Default concurrency
+	}
+	if bp.ChunkSizeMB <= 0 {
+		bp.ChunkSizeMB = 64 // 64MB chunks
 	}
 }
 
