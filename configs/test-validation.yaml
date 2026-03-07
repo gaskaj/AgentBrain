@@ -1,0 +1,35 @@
+agent:
+  log_level: info
+  health_addr: ":8080"
+  schedule: "@every 1h"
+
+storage:
+  bucket: "test-bucket"
+  region: "us-east-1"
+  prefix: "data/"
+
+sources:
+  test_salesforce:
+    type: salesforce
+    enabled: true
+    schedule: "0 */6 * * *"
+    concurrency: 2
+    batch_size: 10000
+    objects:
+      - Account
+      - Contact
+      - Opportunity
+    auth:
+      client_id: "${SALESFORCE_CLIENT_ID:-test_client_id}"
+      client_secret: "${SALESFORCE_CLIENT_SECRET:-test_client_secret}"
+      username: "${SALESFORCE_USERNAME:-test@example.com}"
+      password: "${SALESFORCE_PASSWORD:-test_password}"
+      security_token: "${SALESFORCE_SECURITY_TOKEN:-test_token}"
+      login_url: "https://login.salesforce.com"
+    options:
+      api_version: "v59.0"
+
+monitoring:
+  enabled: true
+  check_interval: 5m
+  alert_cooldown: 30m

@@ -54,3 +54,99 @@ func (r *Registry) Types() []string {
 	}
 	return types
 }
+
+// ValidateSourceConfig validates a source configuration using the appropriate connector.
+func (r *Registry) ValidateSourceConfig(sourceConfig *config.SourceConfig) error {
+	r.mu.RLock()
+	factory, exists := r.factories[sourceConfig.Type]
+	r.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("unknown connector type: %s", sourceConfig.Type)
+	}
+
+	// Create temporary connector instance for validation
+	tempConnector, err := factory(sourceConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create connector for validation: %w", err)
+	}
+
+	// Convert string maps to interface{} maps for validation
+	authMap := make(map[string]interface{})
+	for k, v := range sourceConfig.Auth {
+		authMap[k] = v
+	}
+
+	optionsMap := make(map[string]interface{})
+	for k, v := range sourceConfig.Options {
+		optionsMap[k] = v
+	}
+
+	return tempConnector.ValidateConfig(authMap, optionsMap)
+}
+
+// GetConnectorSchema returns the configuration schema for a connector type.
+func (r *Registry) GetConnectorSchema(connectorType string) (map[string]interface{}, error) {
+	r.mu.RLock()
+	_, exists := r.factories[connectorType]
+	r.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("unknown connector type: %s", connectorType)
+	}
+
+	// For now, directly return schema for known connector types
+	// This avoids the need to instantiate connectors just for schema retrieval
+	switch connectorType {
+	case "salesforce":
+		// Return hardcoded schema for Salesforce to avoid import cycles
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"client_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Salesforce OAuth2 client ID",
+					"required":    true,
+				},
+				"client_secret": map[string]interface{}{
+					"type":        "string",
+					"description": "Salesforce OAuth2 client secret",
+					"required":    true,
+				},
+				"username": map[string]interface{}{
+					"type":        "string",
+					"description": "Salesforce username (must be a valid email)",
+					"format":      "email",
+					"required":    true,
+				},
+				"password": map[string]interface{}{
+					"type":        "string",
+					"description": "Salesforce password",
+					"required":    true,
+				},
+				"security_token": map[string]interface{}{
+					"type":        "string",
+					"description": "Salesforce security token",
+					"required":    true,
+				},
+				"login_url": map[string]interface{}{
+					"type":        "string",
+					"description": "Salesforce login URL",
+					"format":      "url",
+					"default":     "https://login.salesforce.com",
+					"required":    false,
+				},
+				"api_version": map[string]interface{}{
+					"type":        "string",
+					"description": "Salesforce API version (e.g., v59.0)",
+					"pattern":     "^v\\d+\\.\\d+$",
+					"default":     "v59.0",
+					"required":    false,
+				},
+			},
+			"required": []string{"client_id", "client_secret", "username", "password", "security_token"},
+		}, nil
+	default:
+		return nil, fmt.Errorf("schema not available for connector type: %s", connectorType)
+	}
+}

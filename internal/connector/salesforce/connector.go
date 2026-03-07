@@ -26,14 +26,24 @@ type SalesforceConnector struct {
 
 // NewConnector creates a new Salesforce connector from config.
 func NewConnector(cfg *config.SourceConfig) (connector.Connector, error) {
-	auth := AuthConfig{
-		ClientID:     cfg.Auth["client_id"],
-		ClientSecret: cfg.Auth["client_secret"],
-		Username:     cfg.Auth["username"],
-		Password:     cfg.Auth["password"],
-		SecurityToken: cfg.Auth["security_token"],
-		LoginURL:     cfg.Auth["login_url"],
+	// Convert string maps to interface{} maps for validation
+	authMap := make(map[string]interface{})
+	for k, v := range cfg.Auth {
+		authMap[k] = v
 	}
+	optionsMap := make(map[string]interface{})
+	for k, v := range cfg.Options {
+		optionsMap[k] = v
+	}
+
+	// Parse and validate configuration using structured config
+	structuredConfig, err := FromMap(authMap, optionsMap)
+	if err != nil {
+		return nil, fmt.Errorf("salesforce connector configuration error: %w", err)
+	}
+
+	// Convert to legacy AuthConfig format for backward compatibility
+	auth := structuredConfig.ToAuthConfig()
 
 	logger := slog.Default().With("connector", connectorName)
 	client := NewClient(auth, logger)
@@ -107,6 +117,18 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// ValidateConfig validates the Salesforce connector configuration.
+func (c *SalesforceConnector) ValidateConfig(auth map[string]interface{}, options map[string]interface{}) error {
+	_, err := FromMap(auth, options)
+	return err
+}
+
+// ConfigSchema returns the configuration schema for the Salesforce connector.
+func (c *SalesforceConnector) ConfigSchema() map[string]interface{} {
+	config := &Config{}
+	return config.Schema()
 }
 
 // Register adds the Salesforce connector factory to a registry.

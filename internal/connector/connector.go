@@ -29,6 +29,12 @@ type Connector interface {
 
 	// GetFullSnapshot streams all records for a full sync.
 	GetFullSnapshot(ctx context.Context, objectName string) (<-chan RecordBatch, <-chan error)
+
+	// ValidateConfig validates connector-specific configuration.
+	ValidateConfig(auth map[string]interface{}, options map[string]interface{}) error
+
+	// ConfigSchema returns schema for this connector's configuration.
+	ConfigSchema() map[string]interface{}
 }
 
 // ObjectMetadata describes a data object from the source system.
