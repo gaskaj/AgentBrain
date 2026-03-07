@@ -42,6 +42,17 @@ type SourceConfig struct {
 	Objects     []string          `yaml:"objects"`
 	Auth        map[string]string `yaml:"auth"`
 	Options     map[string]string `yaml:"options"`
+	Checkpoint  *CheckpointConfig `yaml:"checkpoint,omitempty"`
+}
+
+type CheckpointConfig struct {
+	Frequency         int    `yaml:"frequency"`
+	RetentionDays     int    `yaml:"retention_days"`
+	MaxCheckpoints    int    `yaml:"max_checkpoints"`
+	ValidationEnabled bool   `yaml:"validation_enabled"`
+	CompactionEnabled bool   `yaml:"compaction_enabled"`
+	SizeThresholdMB   int64  `yaml:"size_threshold_mb"`
+	AdaptiveMode      bool   `yaml:"adaptive_mode"`
 }
 
 func Load(path string) (*Config, error) {
@@ -120,6 +131,26 @@ func setDefaults(cfg *Config) {
 		if src.BatchSize <= 0 {
 			src.BatchSize = 10000
 		}
+		
+		// Set checkpoint defaults if checkpoint config is provided
+		if src.Checkpoint != nil {
+			setCheckpointDefaults(src.Checkpoint)
+		}
+	}
+}
+
+func setCheckpointDefaults(cp *CheckpointConfig) {
+	if cp.Frequency <= 0 {
+		cp.Frequency = 10
+	}
+	if cp.RetentionDays <= 0 {
+		cp.RetentionDays = 30
+	}
+	if cp.MaxCheckpoints <= 0 {
+		cp.MaxCheckpoints = 50
+	}
+	if cp.SizeThresholdMB <= 0 {
+		cp.SizeThresholdMB = 128
 	}
 }
 

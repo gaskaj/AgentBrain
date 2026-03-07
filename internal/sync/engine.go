@@ -247,9 +247,9 @@ func (e *Engine) syncObject(ctx context.Context, state *SyncState, plan *ObjectP
 			}
 		}
 
-		// Maybe checkpoint
+		// Maybe checkpoint (using legacy checkpoint manager for now)
 		checkpointKey := e.layout.DeltaLastCheckpoint(e.source, plan.ObjectName)
-		cm := delta.NewCheckpointManager(e.s3, table, checkpointKey, e.layout.DeltaLogPrefix(e.source, plan.ObjectName), e.logger)
+		cm := delta.NewLegacyCheckpointManager(e.s3, table, checkpointKey, e.layout.DeltaLogPrefix(e.source, plan.ObjectName), e.logger)
 		if err := cm.MaybeCheckpoint(ctx, version); err != nil {
 			e.logger.Warn("checkpoint failed", "error", err)
 		}
