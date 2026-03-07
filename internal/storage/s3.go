@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -203,4 +204,106 @@ func (c *S3Client) UploadReader(ctx context.Context, key string, r io.Reader, co
 		return fmt.Errorf("read data for %s: %w", key, err)
 	}
 	return c.Upload(ctx, key, data, contentType)
+}
+
+// ObjectMetadata represents metadata for an S3 object
+type ObjectMetadata struct {
+	Key           string
+	Size          int64
+	LastModified  time.Time
+	ETag          string
+	ContentType   string
+}
+
+// CopyObject copies an object from one location to another within S3
+func (c *S3Client) CopyObject(ctx context.Context, sourceKey, destKey string) error {
+	sourceURI := fmt.Sprintf("%s/%s", c.bucket, c.fullKey(sourceKey))
+	
+	input := &s3.CopyObjectInput{
+		Bucket:     aws.String(c.bucket),
+		Key:        aws.String(c.fullKey(destKey)),
+		CopySource: aws.String(sourceURI),
+	}
+
+	_, err := c.client.CopyObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("copy s3://%s/%s to s3://%s/%s: %w", 
+			c.bucket, sourceKey, c.bucket, destKey, err)
+	}
+	return nil
+}
+
+// CopyObjectToBucket copies an object to a different bucket
+func (c *S3Client) CopyObjectToBucket(ctx context.Context, sourceKey, destBucket, destKey string) error {
+	sourceURI := fmt.Sprintf("%s/%s", c.bucket, c.fullKey(sourceKey))
+	
+	input := &s3.CopyObjectInput{
+		Bucket:     aws.String(destBucket),
+		Key:        aws.String(destKey),
+		CopySource: aws.String(sourceURI),
+	}
+
+	_, err := c.client.CopyObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("copy s3://%s/%s to s3://%s/%s: %w", 
+			c.bucket, sourceKey, destBucket, destKey, err)
+	}
+	return nil
+}
+
+// ListObjectsWithMetadata returns a list of objects with their metadata
+func (c *S3Client) ListObjectsWithMetadata(ctx context.Context, prefix string) ([]ObjectMetadata, error) {
+	fullPrefix := c.fullKey(prefix)
+	var objects []ObjectMetadata
+
+	paginator := s3.NewListObjectsV2Paginator(c.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(fullPrefix),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list objects s3://%s/%s: %w", c.bucket, prefix, err)
+		}
+		
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			if c.prefix != "" {
+				key = strings.TrimPrefix(key, c.prefix+"/")
+			}
+			
+			metadata := ObjectMetadata{
+				Key:          key,
+				Size:         aws.ToInt64(obj.Size),
+				LastModified: aws.ToTime(obj.LastModified),
+				ETag:         aws.ToString(obj.ETag),
+			}
+			objects = append(objects, metadata)
+		}
+	}
+	return objects, nil
+}
+
+// GetObjectMetadata retrieves metadata for a specific object
+func (c *S3Client) GetObjectMetadata(ctx context.Context, key string) (*ObjectMetadata, error) {
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(c.fullKey(key)),
+	}
+
+	resp, err := c.client.HeadObject(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("get object metadata s3://%s/%s: %w", c.bucket, key, err)
+	}
+
+	metadata := &ObjectMetadata{
+		Key:          key,
+		Size:         aws.ToInt64(resp.ContentLength),
+		LastModified: aws.ToTime(resp.LastModified),
+		ETag:         aws.ToString(resp.ETag),
+		ContentType:  aws.ToString(resp.ContentType),
+	}
+
+	return metadata, nil
 }
