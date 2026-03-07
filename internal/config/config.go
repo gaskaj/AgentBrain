@@ -77,6 +77,27 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// ValidateWithRegistry validates the configuration using the provided connector registry.
+func (c *Config) ValidateWithRegistry(registry ConnectorRegistry) error {
+	// First validate basic config structure
+	if err := validate(c); err != nil {
+		return err
+	}
+
+	// Then validate each connector's configuration
+	for sourceName, sourceConfig := range c.Sources {
+		if err := registry.ValidateSourceConfig(sourceConfig); err != nil {
+			return fmt.Errorf("invalid config for source %s: %w", sourceName, err)
+		}
+	}
+	return nil
+}
+
+// ConnectorRegistry interface for configuration validation
+type ConnectorRegistry interface {
+	ValidateSourceConfig(sourceConfig *SourceConfig) error
+}
+
 var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
 
 func expandEnvVars(s string) string {

@@ -1,0 +1,15 @@
+agent:
+  log_level: info
+
+storage:
+  bucket: "test-bucket"
+  region: "us-east-1"
+
+sources:
+  bad_salesforce:
+    type: salesforce
+    enabled: true
+    auth:
+      client_id: "test_client_id" 
+      # Missing required fields: client_secret, username, password, security_token
+    options: {}
