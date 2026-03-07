@@ -139,12 +139,37 @@ Defaults are applied for optional fields. Validation ensures required fields are
 
 ### Delta Lake Transaction Log
 
-Custom implementation of the Delta protocol spec (subset):
+Custom implementation of the Delta protocol spec with enhanced checkpoint management:
 
 - **Version files:** `_delta_log/{version:020d}.json` (newline-delimited JSON)
 - **Action types:** `protocol`, `metaData`, `add`, `remove`, `commitInfo`
 - **Time-travel:** Replay log from version 0 to reconstruct state at any point
-- **Checkpoints:** JSON snapshots every 10 versions to avoid replaying entire log
+- **Enhanced checkpoints:** Comprehensive checkpoint lifecycle management
+
+#### Enhanced Checkpoint Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│             CheckpointManager                   │
+├─────────────────┬───────────────────────────────┤
+│ Configuration   │  Lifecycle Management         │
+│ • Frequency     │  • Adaptive scheduling        │
+│ • Retention     │  • Validation & recovery      │
+│ • Thresholds    │  • Cleanup & compaction       │
+├─────────────────┼───────────────────────────────┤
+│ Metrics         │  CheckpointValidator          │
+│ • Health score  │  • Integrity verification     │
+│ • Performance   │  • Corruption detection       │
+│ • Storage saved │  • Fallback mechanisms        │
+└─────────────────┴───────────────────────────────┘
+```
+
+The enhanced checkpoint system provides:
+- **Adaptive frequency** based on data volume and performance
+- **Validation and recovery** from corrupted checkpoints
+- **Automatic cleanup** with configurable retention policies
+- **File compaction** during checkpoint creation
+- **Performance monitoring** and health scoring
 
 ### Sync State
 

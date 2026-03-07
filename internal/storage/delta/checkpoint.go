@@ -7,6 +7,7 @@ import (
 	"log/slog"
 )
 
+// Deprecated: Use CheckpointConfig from checkpoint_manager.go instead
 const checkpointInterval = 10
 
 // LastCheckpoint records which version was last checkpointed.
@@ -15,8 +16,8 @@ type LastCheckpoint struct {
 	Size    int64 `json:"size"`
 }
 
-// CheckpointManager handles periodic checkpointing of Delta tables.
-type CheckpointManager struct {
+// LegacyCheckpointManager handles basic checkpointing (deprecated - use CheckpointManager).
+type LegacyCheckpointManager struct {
 	store             S3Store
 	table             *DeltaTable
 	lastCheckpointKey string
@@ -24,9 +25,9 @@ type CheckpointManager struct {
 	logger            *slog.Logger
 }
 
-// NewCheckpointManager creates a checkpoint manager for a delta table.
-func NewCheckpointManager(store S3Store, table *DeltaTable, lastCheckpointKey, logPrefix string, logger *slog.Logger) *CheckpointManager {
-	return &CheckpointManager{
+// NewLegacyCheckpointManager creates a basic checkpoint manager (deprecated).
+func NewLegacyCheckpointManager(store S3Store, table *DeltaTable, lastCheckpointKey, logPrefix string, logger *slog.Logger) *LegacyCheckpointManager {
+	return &LegacyCheckpointManager{
 		store:             store,
 		table:             table,
 		lastCheckpointKey: lastCheckpointKey,
@@ -36,7 +37,7 @@ func NewCheckpointManager(store S3Store, table *DeltaTable, lastCheckpointKey, l
 }
 
 // MaybeCheckpoint creates a checkpoint if the version is at a checkpoint interval.
-func (m *CheckpointManager) MaybeCheckpoint(ctx context.Context, version int64) error {
+func (m *LegacyCheckpointManager) MaybeCheckpoint(ctx context.Context, version int64) error {
 	if version == 0 || version%checkpointInterval != 0 {
 		return nil
 	}
@@ -45,7 +46,7 @@ func (m *CheckpointManager) MaybeCheckpoint(ctx context.Context, version int64) 
 
 // CreateCheckpoint writes a JSON checkpoint (simplified - not Parquet for simplicity)
 // containing the full snapshot state at the given version.
-func (m *CheckpointManager) CreateCheckpoint(ctx context.Context, version int64) error {
+func (m *LegacyCheckpointManager) CreateCheckpoint(ctx context.Context, version int64) error {
 	snap, err := m.table.Snapshot(ctx, version)
 	if err != nil {
 		return fmt.Errorf("snapshot for checkpoint at version %d: %w", version, err)
@@ -87,7 +88,7 @@ func (m *CheckpointManager) CreateCheckpoint(ctx context.Context, version int64)
 }
 
 // GetLastCheckpoint reads the last checkpoint marker.
-func (m *CheckpointManager) GetLastCheckpoint(ctx context.Context) (*LastCheckpoint, error) {
+func (m *LegacyCheckpointManager) GetLastCheckpoint(ctx context.Context) (*LastCheckpoint, error) {
 	var lc LastCheckpoint
 	err := m.store.GetJSON(ctx, m.lastCheckpointKey, &lc)
 	if err != nil {

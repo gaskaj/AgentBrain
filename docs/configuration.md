@@ -90,6 +90,36 @@ sources:
 | `objects` | []string | `[]` (all) | Allow list of object names to sync. Empty means sync all queryable objects discovered by the connector. |
 | `auth` | map | - | Key-value pairs for authentication. Keys are connector-specific. |
 | `options` | map | - | Key-value pairs for additional connector-specific settings. |
+| `checkpoint` | map | - | Checkpoint management configuration. See below for options. |
+
+### Checkpoint Configuration
+
+Each source can include checkpoint management settings:
+
+```yaml
+sources:
+  source_name:
+    checkpoint:
+      frequency: 10              # Commits between checkpoints
+      retention_days: 30         # Days to retain old checkpoints
+      max_checkpoints: 50        # Maximum checkpoints to keep
+      validation_enabled: true   # Validate checkpoints after creation
+      compaction_enabled: true   # Enable small file compaction
+      adaptive_mode: true        # Use adaptive checkpoint frequency
+      size_threshold_mb: 128     # Size threshold for adaptive mode
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `frequency` | int | `10` | Number of commits between checkpoints |
+| `retention_days` | int | `30` | Days to retain old checkpoints |
+| `max_checkpoints` | int | `50` | Maximum checkpoints to retain |
+| `validation_enabled` | bool | `false` | Enable checkpoint validation |
+| `compaction_enabled` | bool | `false` | Enable file compaction during checkpointing |
+| `adaptive_mode` | bool | `false` | Adjust frequency based on data volume |
+| `size_threshold_mb` | int64 | `128` | Data volume threshold for adaptive mode |
+
+For detailed guidance on checkpoint configuration, see [Checkpoint Management Guide](checkpoint-management.md).
 
 ### Salesforce Auth Keys
 

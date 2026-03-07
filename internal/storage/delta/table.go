@@ -16,10 +16,11 @@ type Snapshot struct {
 
 // DeltaTable manages a Delta Lake table.
 type DeltaTable struct {
-	log    *TransactionLog
-	source string
-	object string
-	logger *slog.Logger
+	log               *TransactionLog
+	checkpointManager *CheckpointManager
+	source            string
+	object            string
+	logger            *slog.Logger
 }
 
 // NewDeltaTable creates a new DeltaTable manager.
@@ -30,6 +31,21 @@ func NewDeltaTable(store S3Store, source, object, logPrefix string, logger *slog
 		object: object,
 		logger: logger,
 	}
+}
+
+// NewDeltaTableWithCheckpoints creates a DeltaTable with comprehensive checkpoint management.
+func NewDeltaTableWithCheckpoints(store S3Store, source, object, logPrefix string, config DeltaCheckpointConfig, logger *slog.Logger) *DeltaTable {
+	table := &DeltaTable{
+		log:    NewTransactionLog(store, logPrefix),
+		source: source,
+		object: object,
+		logger: logger,
+	}
+	
+	lastCheckpointKey := fmt.Sprintf("%s_last_checkpoint", logPrefix)
+	table.checkpointManager = NewCheckpointManager(store, table, config, lastCheckpointKey, logPrefix, logger)
+	
+	return table
 }
 
 // Initialize creates the initial version (0) with protocol and metadata.
@@ -71,6 +87,14 @@ func (t *DeltaTable) Commit(ctx context.Context, actions []Action, operation str
 
 	if err := t.log.WriteVersion(ctx, newVersion, allActions); err != nil {
 		return -1, fmt.Errorf("commit version %d: %w", newVersion, err)
+	}
+
+	// Create checkpoint if checkpoint manager is available
+	if t.checkpointManager != nil {
+		if err := t.checkpointManager.MaybeCheckpoint(ctx, newVersion); err != nil {
+			t.logger.Warn("checkpoint creation failed", "version", newVersion, "error", err)
+			// Don't fail the commit if checkpoint fails
+		}
 	}
 
 	t.logger.Info("committed delta version",
@@ -143,4 +167,14 @@ func (t *DeltaTable) ActiveFiles(ctx context.Context) ([]string, error) {
 		files = append(files, path)
 	}
 	return files, nil
+}
+
+// GetCheckpointManager returns the checkpoint manager if available.
+func (t *DeltaTable) GetCheckpointManager() *CheckpointManager {
+	return t.checkpointManager
+}
+
+// SetCheckpointManager sets the checkpoint manager for the table.
+func (t *DeltaTable) SetCheckpointManager(manager *CheckpointManager) {
+	t.checkpointManager = manager
 }

@@ -172,9 +172,10 @@ for path, addAction := range snap.Files {
 
 ## Checkpoints
 
-To avoid replaying the entire log on every read, checkpoints capture the complete state at a version:
+To avoid replaying the entire log on every read, checkpoints capture the complete state at a version. AgentBrain implements comprehensive checkpoint management with the following features:
 
-- Created every 10 versions (configurable via `checkpointInterval`)
+### Basic Checkpoints
+- Created every 10 versions by default (configurable)
 - Stored as `_delta_log/{version:020d}.checkpoint.json`
 - Contains all active `protocol`, `metaData`, and `add` actions
 - `_last_checkpoint` file records the latest checkpoint version
@@ -183,6 +184,34 @@ To avoid replaying the entire log on every read, checkpoints capture the complet
 // _last_checkpoint
 {"version": 10, "size": 42}
 ```
+
+### Enhanced Checkpoint Management
+
+AgentBrain extends basic checkpointing with:
+
+- **Adaptive Frequency**: Adjust checkpoint intervals based on data volume and performance
+- **Validation & Recovery**: Detect corrupted checkpoints and fallback to previous valid versions
+- **Automatic Cleanup**: Remove old checkpoints based on retention policies
+- **File Compaction**: Optimize small files during checkpoint creation
+- **Performance Monitoring**: Track checkpoint health and log replay improvements
+
+### Configuration
+
+Configure checkpoint behavior per source:
+
+```yaml
+sources:
+  my_source:
+    checkpoint:
+      frequency: 10              # Commits between checkpoints
+      retention_days: 30         # Days to retain old checkpoints
+      validation_enabled: true   # Enable integrity checks
+      adaptive_mode: true        # Dynamic frequency adjustment
+      compaction_enabled: true   # Small file optimization
+      size_threshold_mb: 128     # Size threshold for adaptive mode
+```
+
+For detailed configuration and operational procedures, see [Checkpoint Management Guide](checkpoint-management.md).
 
 ## Go Implementation
 
