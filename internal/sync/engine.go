@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -31,6 +32,8 @@ type Engine struct {
 	validator           validation.Validator
 	validationConfig    *config.ValidationConfig
 	metricsCollector    *validation.MetricsCollector
+	recoveryManager     *RecoveryManager
+	errorAggregator     *ErrorAggregator
 }
 
 // NewEngine creates a new sync engine.
@@ -42,16 +45,23 @@ func NewEngine(
 	objects []string,
 	logger *slog.Logger,
 ) *Engine {
+	// Create recovery manager with default config
+	recoveryConfig := DefaultRecoveryConfig()
+	stateStore := NewS3RecoveryStateStore(s3, s3.GetBucket(), fmt.Sprintf("sync/%s", source), logger)
+	recoveryManager := NewRecoveryManager(recoveryConfig, stateStore, logger)
+	
 	return &Engine{
-		connector:   conn,
-		s3:          s3,
-		stateStore:  NewStateStore(s3, logger),
-		planner:     NewPlanner(logger),
-		writer:      storage.NewParquetWriter(s3, source, logger),
-		source:      source,
-		concurrency: concurrency,
-		objects:     objects,
-		logger:      logger,
+		connector:       conn,
+		s3:              s3,
+		stateStore:      NewStateStore(s3, logger),
+		planner:         NewPlanner(logger),
+		writer:          storage.NewParquetWriter(s3, source, logger),
+		source:          source,
+		concurrency:     concurrency,
+		objects:         objects,
+		logger:          logger,
+		recoveryManager: recoveryManager,
+		errorAggregator: NewErrorAggregator(),
 	}
 }
 
@@ -79,6 +89,11 @@ func NewEngineWithConsistency(
 		consistencyTracker = NewConsistencyTracker(s3, source, syncConfig, logger)
 	}
 
+	// Create recovery manager with default config
+	recoveryConfig := DefaultRecoveryConfig()
+	stateStore := NewS3RecoveryStateStore(s3, s3.GetBucket(), fmt.Sprintf("sync/%s", source), logger)
+	recoveryManager := NewRecoveryManager(recoveryConfig, stateStore, logger)
+
 	return &Engine{
 		connector:           conn,
 		s3:                  s3,
@@ -91,6 +106,8 @@ func NewEngineWithConsistency(
 		logger:              logger,
 		consistencyTracker:  consistencyTracker,
 		consistencyConfig:   consistencyConfig,
+		recoveryManager:     recoveryManager,
+		errorAggregator:     NewErrorAggregator(),
 	}
 }
 
@@ -103,6 +120,7 @@ func NewEngineWithValidation(
 	objects []string,
 	consistencyConfig *config.ConsistencyConfig,
 	validationConfig *config.ValidationConfig,
+	errorHandlingConfig *config.ErrorHandlingConfig,
 	logger *slog.Logger,
 ) *Engine {
 	var consistencyTracker *ConsistencyTracker
@@ -157,6 +175,25 @@ func NewEngineWithValidation(
 		metricsCollector = validation.NewMetricsCollector(s3, logger)
 	}
 
+	// Create recovery manager
+	var recoveryConfig RecoveryConfig
+	if errorHandlingConfig != nil {
+		recoveryConfig = RecoveryConfig{
+			MaxRetries:              errorHandlingConfig.MaxRetries,
+			BaseDelay:               errorHandlingConfig.BaseDelay,
+			MaxDelay:                errorHandlingConfig.MaxDelay,
+			CircuitBreakerThreshold: errorHandlingConfig.CircuitBreakerThreshold,
+			CircuitBreakerTimeout:   errorHandlingConfig.CircuitBreakerTimeout,
+			PartialRecovery:         errorHandlingConfig.PartialRecovery,
+			SkipFailedObjects:       errorHandlingConfig.SkipFailedObjects,
+		}
+	} else {
+		recoveryConfig = DefaultRecoveryConfig()
+	}
+	
+	stateStore := NewS3RecoveryStateStore(s3, s3.GetBucket(), fmt.Sprintf("sync/%s", source), logger)
+	recoveryManager := NewRecoveryManager(recoveryConfig, stateStore, logger)
+
 	return &Engine{
 		connector:           conn,
 		s3:                  s3,
@@ -172,6 +209,8 @@ func NewEngineWithValidation(
 		validator:           validator,
 		validationConfig:    validationConfig,
 		metricsCollector:    metricsCollector,
+		recoveryManager:     recoveryManager,
+		errorAggregator:     NewErrorAggregator(),
 	}
 }
 
@@ -179,6 +218,7 @@ func NewEngineWithValidation(
 func (e *Engine) Run(ctx context.Context) error {
 	e.logger.Info("starting sync run", "source", e.source)
 	startTime := time.Now()
+	correlationID := fmt.Sprintf("sync_%s_%d", e.source, startTime.Unix())
 	
 	// Create validation report if validation is enabled
 	var validationReport *validation.ValidationReport
@@ -187,8 +227,16 @@ func (e *Engine) Run(ctx context.Context) error {
 		validationReport = e.metricsCollector.CreateReport(e.source, syncID)
 	}
 
-	// 1. Connect
-	if err := e.connector.Connect(ctx); err != nil {
+	// 1. Connect with error handling
+	connectOp := func(ctx context.Context) (*Result, error) {
+		if err := e.connector.Connect(ctx); err != nil {
+			return nil, NewSyncError(SyncPhaseConnect, "", err, true).WithCorrelationID(correlationID)
+		}
+		return &Result{}, nil
+	}
+	
+	_, err := e.recoveryManager.ExecuteWithRetry(ctx, e.source, "connection", SyncPhaseConnect, connectOp)
+	if err != nil {
 		return fmt.Errorf("connect to %s: %w", e.source, err)
 	}
 	defer e.connector.Close()
@@ -196,11 +244,22 @@ func (e *Engine) Run(ctx context.Context) error {
 	// 2. Load state
 	state, err := e.stateStore.Load(ctx, e.source)
 	if err != nil {
-		return fmt.Errorf("load state: %w", err)
+		syncErr := NewSyncError(SyncPhaseDiscover, "", err, true).WithCorrelationID(correlationID)
+		return fmt.Errorf("load state: %w", syncErr)
 	}
 
-	// 3. Discover metadata
-	allObjects, err := e.connector.DiscoverMetadata(ctx)
+	// 3. Discover metadata with error handling
+	var allObjects []connector.ObjectMetadata
+	discoverOp := func(ctx context.Context) (*Result, error) {
+		objects, err := e.connector.DiscoverMetadata(ctx)
+		if err != nil {
+			return nil, NewSyncError(SyncPhaseDiscover, "", err, true).WithCorrelationID(correlationID)
+		}
+		allObjects = objects
+		return &Result{RecordsProcessed: int64(len(objects))}, nil
+	}
+	
+	_, err = e.recoveryManager.ExecuteWithRetry(ctx, e.source, "discovery", SyncPhaseDiscover, discoverOp)
 	if err != nil {
 		return fmt.Errorf("discover metadata: %w", err)
 	}
@@ -235,10 +294,9 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	e.logger.Info("sync plan ready", "total_objects", len(plans))
 
-	// 5. Execute plans concurrently
+	// 5. Execute plans concurrently with error handling
 	sem := make(chan struct{}, e.concurrency)
 	var mu sync.Mutex
-	var syncErrors []error
 	var objectValidationResults = make(map[string][]validation.BatchValidationResult)
 
 	var wg sync.WaitGroup
@@ -250,19 +308,30 @@ func (e *Engine) Run(ctx context.Context) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			batchResults, err := e.syncObjectWithValidation(ctx, state, p)
-			if err != nil {
-				e.logger.Error("sync failed", "object", p.ObjectName, "error", err)
-				mu.Lock()
-				syncErrors = append(syncErrors, fmt.Errorf("%s: %w", p.ObjectName, err))
-				mu.Unlock()
-			}
-			
-			// Store validation results for reporting
-			if len(batchResults) > 0 {
+			// Execute object sync with recovery
+			syncObjectOp := func(ctx context.Context) (*Result, error) {
+				batchResults, err := e.syncObjectWithValidation(ctx, state, p)
+				if err != nil {
+					// Wrap error with sync context
+					var syncErr *SyncError
+					if !errors.As(err, &syncErr) {
+						syncErr = NewSyncError(SyncPhaseExtract, p.ObjectName, err, true).WithCorrelationID(correlationID)
+					}
+					return nil, syncErr
+				}
+				
+				// Store validation results for reporting
 				mu.Lock()
 				objectValidationResults[p.ObjectName] = batchResults
 				mu.Unlock()
+				
+				return &Result{RecordsProcessed: int64(len(batchResults))}, nil
+			}
+			
+			_, err := e.recoveryManager.ExecuteWithRetry(ctx, e.source, p.ObjectName, SyncPhaseExtract, syncObjectOp)
+			if err != nil {
+				e.logger.Error("sync failed", "object", p.ObjectName, "error", err, "correlation_id", correlationID)
+				e.errorAggregator.Add(err)
 			}
 		}(plan)
 	}
@@ -342,15 +411,29 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	elapsed := time.Since(startTime)
+	
+	// Check for aggregated errors
+	aggregatedErr := e.errorAggregator.Error()
+	errorCount := len(e.errorAggregator.Errors())
+	
 	e.logger.Info("sync run completed",
 		"source", e.source,
 		"duration", elapsed,
 		"objects", len(plans),
-		"errors", len(syncErrors),
+		"errors", errorCount,
+		"correlation_id", correlationID,
 	)
 
-	if len(syncErrors) > 0 {
-		return fmt.Errorf("%d objects failed to sync", len(syncErrors))
+	if aggregatedErr != nil {
+		// Log detailed error information
+		for _, err := range e.errorAggregator.Errors() {
+			if syncErr, ok := err.(*SyncError); ok {
+				if errJSON, jsonErr := syncErr.JSON(); jsonErr == nil {
+					e.logger.Error("sync error details", "error_json", string(errJSON))
+				}
+			}
+		}
+		return fmt.Errorf("sync failed with %d errors: %w", errorCount, aggregatedErr)
 	}
 
 	return nil

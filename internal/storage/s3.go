@@ -307,3 +307,13 @@ func (c *S3Client) GetObjectMetadata(ctx context.Context, key string) (*ObjectMe
 
 	return metadata, nil
 }
+
+// GetBucket returns the bucket name
+func (c *S3Client) GetBucket() string {
+	return c.bucket
+}
+
+// ListKeys returns a list of keys matching the prefix (alias for List)
+func (c *S3Client) ListKeys(ctx context.Context, prefix string) ([]string, error) {
+	return c.List(ctx, prefix)
+}

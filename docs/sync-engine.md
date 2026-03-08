@@ -84,12 +84,73 @@ for _, plan := range plans {
 
 A `sync.Mutex` protects the shared `SyncState` map when parallel goroutines update their object states.
 
-### Error Handling
+### Error Handling and Recovery
 
-- Individual object failures are logged but don't stop other objects
-- The engine collects all errors and reports the total count
-- Watermarks advance only after successful Delta commit (at-least-once)
-- Non-critical failures (catalog save, checkpoint) are logged as warnings
+The sync engine includes comprehensive error handling and recovery capabilities:
+
+#### Rich Error Context
+All sync errors are wrapped with `SyncError` which captures:
+- **Sync phase** where failure occurred (Connect, Discover, Extract, Transform, Store, Commit, Validate)
+- **Object context** including object name and batch information
+- **System state** including memory usage, goroutine count, and storage metrics
+- **Recovery suggestions** based on the error type and phase
+- **Correlation IDs** for tracing errors across systems
+
+#### Automatic Recovery
+The `RecoveryManager` provides:
+- **Exponential backoff** with jitter (1s base, 60s max, configurable)
+- **Circuit breaker** pattern to prevent cascade failures (5 failure threshold, 2min timeout)
+- **Partial recovery** from last successful batch within objects
+- **Cross-restart persistence** of recovery state in S3
+
+#### Error Handling Flow
+```
+1. Connect (with retry)
+   └── recoveryManager.ExecuteWithRetry(connectOp)
+       ├── Retry on authentication failures
+       └── Circuit breaker for upstream unavailability
+
+2. Discovery (with retry)
+   └── recoveryManager.ExecuteWithRetry(discoverOp)
+       ├── Retry on transient API failures
+       └── Rich error context for metadata issues
+
+3. Object Sync (parallel with individual recovery)
+   └── For each object:
+       ├── recoveryManager.ExecuteWithRetry(syncObjectOp)
+       ├── Recovery state stored in S3: recovery/{source}/{object}.json
+       ├── Batch-level checkpointing for large objects
+       └── Error aggregation across all objects
+
+4. Error Aggregation
+   └── errorAggregator.Errors()
+       ├── Collect all sync errors with correlation IDs
+       ├── Log detailed JSON error context
+       └── Return aggregated error with count
+```
+
+#### Configuration
+Error handling can be configured per source:
+```yaml
+sources:
+  salesforce:
+    error_handling:
+      max_retries: 3
+      base_delay: 1s
+      max_delay: 60s
+      circuit_breaker_threshold: 5
+      partial_recovery: true
+      skip_failed_objects: false
+```
+
+#### Recovery Tools
+CLI tools provide operational recovery capabilities:
+- `recover -source X -object Y`: Resume specific failed sync
+- `diagnose -error-id ID`: Analyze error by correlation ID  
+- `retry-failed`: Bulk retry all failed operations
+- `list-failed`: Show all current recovery states
+
+See [Error Handling Guide](error-handling.md) for detailed troubleshooting procedures.
 
 ## Planner
 

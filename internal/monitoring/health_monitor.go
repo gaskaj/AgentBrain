@@ -24,6 +24,7 @@ type MetricsSnapshot struct {
 	AgentMetrics    AgentMetrics
 	SystemMetrics   SystemMetrics
 	BusinessMetrics BusinessMetrics
+	ErrorMetrics    ErrorMetrics
 }
 
 // AgentMetrics contains agent-specific health metrics
@@ -53,6 +54,24 @@ type BusinessMetrics struct {
 	TokenUsagePercent   float64
 }
 
+// ErrorMetrics contains error pattern tracking metrics
+type ErrorMetrics struct {
+	SyncErrorRate        float64                 `json:"sync_error_rate"`
+	RecoverySuccessRate  float64                 `json:"recovery_success_rate"`
+	CircuitBreakerTrips  int64                   `json:"circuit_breaker_trips"`
+	ErrorsByPhase        map[string]int64        `json:"errors_by_phase"`
+	ErrorsByObject       map[string]int64        `json:"errors_by_object"`
+	RetryPatterns        map[string]RetryMetrics `json:"retry_patterns"`
+}
+
+// RetryMetrics tracks retry patterns for specific operations
+type RetryMetrics struct {
+	TotalAttempts    int64   `json:"total_attempts"`
+	SuccessfulRetries int64   `json:"successful_retries"`
+	FailedRetries    int64   `json:"failed_retries"`
+	AverageRetryDelay float64 `json:"average_retry_delay_ms"`
+}
+
 // HealthRule defines an interface for health check rules
 type HealthRule interface {
 	Name() string
@@ -63,15 +82,119 @@ type HealthRule interface {
 
 // HealthMonitor orchestrates health monitoring and alerting
 type HealthMonitor struct {
-	config     MonitoringConfig
-	rules      []HealthRule
-	alerting   *AlertManager
-	logger     *slog.Logger
-	mu         sync.RWMutex
-	lastCheck  time.Time
-	isRunning  bool
-	stopCh     chan struct{}
-	doneCh     chan struct{}
+	config       MonitoringConfig
+	rules        []HealthRule
+	alerting     *AlertManager
+	logger       *slog.Logger
+	mu           sync.RWMutex
+	lastCheck    time.Time
+	isRunning    bool
+	stopCh       chan struct{}
+	doneCh       chan struct{}
+	errorTracker *ErrorPatternTracker
+}
+
+// ErrorPatternTracker tracks and analyzes error patterns
+type ErrorPatternTracker struct {
+	errorCounts   map[string]int64
+	phaseCounts   map[string]int64
+	objectCounts  map[string]int64
+	retryMetrics  map[string]*RetryMetrics
+	mu            sync.RWMutex
+}
+
+// NewErrorPatternTracker creates a new error pattern tracker
+func NewErrorPatternTracker() *ErrorPatternTracker {
+	return &ErrorPatternTracker{
+		errorCounts:  make(map[string]int64),
+		phaseCounts:  make(map[string]int64),
+		objectCounts: make(map[string]int64),
+		retryMetrics: make(map[string]*RetryMetrics),
+	}
+}
+
+// RecordError records an error occurrence for pattern analysis
+func (ept *ErrorPatternTracker) RecordError(phase, object, errorType string) {
+	ept.mu.Lock()
+	defer ept.mu.Unlock()
+	
+	ept.errorCounts[errorType]++
+	ept.phaseCounts[phase]++
+	ept.objectCounts[object]++
+}
+
+// RecordRetry records a retry attempt
+func (ept *ErrorPatternTracker) RecordRetry(operation string, success bool, delayMs float64) {
+	ept.mu.Lock()
+	defer ept.mu.Unlock()
+	
+	if ept.retryMetrics[operation] == nil {
+		ept.retryMetrics[operation] = &RetryMetrics{}
+	}
+	
+	metrics := ept.retryMetrics[operation]
+	metrics.TotalAttempts++
+	
+	if success {
+		metrics.SuccessfulRetries++
+	} else {
+		metrics.FailedRetries++
+	}
+	
+	// Update average delay (simple moving average)
+	if metrics.TotalAttempts == 1 {
+		metrics.AverageRetryDelay = delayMs
+	} else {
+		metrics.AverageRetryDelay = (metrics.AverageRetryDelay*float64(metrics.TotalAttempts-1) + delayMs) / float64(metrics.TotalAttempts)
+	}
+}
+
+// GetErrorMetrics returns current error metrics
+func (ept *ErrorPatternTracker) GetErrorMetrics() ErrorMetrics {
+	ept.mu.RLock()
+	defer ept.mu.RUnlock()
+	
+	// Calculate error rates and copy metrics
+	errorsByPhase := make(map[string]int64)
+	for phase, count := range ept.phaseCounts {
+		errorsByPhase[phase] = count
+	}
+	
+	errorsByObject := make(map[string]int64)
+	for object, count := range ept.objectCounts {
+		errorsByObject[object] = count
+	}
+	
+	retryPatterns := make(map[string]RetryMetrics)
+	for operation, metrics := range ept.retryMetrics {
+		retryPatterns[operation] = *metrics
+	}
+	
+	// Calculate rates (simplified - in production you'd use time windows)
+	totalErrors := int64(0)
+	for _, count := range ept.errorCounts {
+		totalErrors += count
+	}
+	
+	totalRetries := int64(0)
+	successfulRetries := int64(0)
+	for _, metrics := range ept.retryMetrics {
+		totalRetries += metrics.TotalAttempts
+		successfulRetries += metrics.SuccessfulRetries
+	}
+	
+	var recoverySuccessRate float64
+	if totalRetries > 0 {
+		recoverySuccessRate = float64(successfulRetries) / float64(totalRetries)
+	}
+	
+	return ErrorMetrics{
+		SyncErrorRate:       float64(totalErrors) / 100.0, // Simplified calculation
+		RecoverySuccessRate: recoverySuccessRate,
+		ErrorsByPhase:       errorsByPhase,
+		ErrorsByObject:      errorsByObject,
+		RetryPatterns:       retryPatterns,
+	}
 }
 
 // NewHealthMonitor creates a new health monitoring system
@@ -82,11 +205,12 @@ func NewHealthMonitor(config MonitoringConfig, logger *slog.Logger) (*HealthMoni
 	}
 
 	hm := &HealthMonitor{
-		config:   config,
-		alerting: alertManager,
-		logger:   logger,
-		stopCh:   make(chan struct{}),
-		doneCh:   make(chan struct{}),
+		config:       config,
+		alerting:     alertManager,
+		logger:       logger,
+		stopCh:       make(chan struct{}),
+		doneCh:       make(chan struct{}),
+		errorTracker: NewErrorPatternTracker(),
 	}
 
 	// Initialize built-in health rules
@@ -299,6 +423,7 @@ func (hm *HealthMonitor) collectMetrics(ctx context.Context) (*MetricsSnapshot, 
 			IssueProcessingRate: 0.91,
 			TokenUsagePercent:   72.5,
 		},
+		ErrorMetrics: hm.errorTracker.GetErrorMetrics(),
 	}, nil
 }
 
