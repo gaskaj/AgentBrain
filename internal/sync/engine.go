@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentbrain/agentbrain/internal/config"
 	"github.com/agentbrain/agentbrain/internal/connector"
 	"github.com/agentbrain/agentbrain/internal/storage"
 	"github.com/agentbrain/agentbrain/internal/storage/delta"
@@ -14,16 +15,18 @@ import (
 
 // Engine orchestrates the sync lifecycle: discover -> plan -> extract -> write -> commit.
 type Engine struct {
-	connector   connector.Connector
-	s3          *storage.S3Client
-	stateStore  *StateStore
-	planner     *Planner
-	writer      *storage.ParquetWriter
-	layout      storage.Layout
-	source      string
-	concurrency int
-	objects     []string
-	logger      *slog.Logger
+	connector           connector.Connector
+	s3                  *storage.S3Client
+	stateStore          *StateStore
+	planner             *Planner
+	writer              *storage.ParquetWriter
+	layout              storage.Layout
+	source              string
+	concurrency         int
+	objects             []string
+	logger              *slog.Logger
+	consistencyTracker  *ConsistencyTracker
+	consistencyConfig   *config.ConsistencyConfig
 }
 
 // NewEngine creates a new sync engine.
@@ -45,6 +48,45 @@ func NewEngine(
 		concurrency: concurrency,
 		objects:     objects,
 		logger:      logger,
+	}
+}
+
+// NewEngineWithConsistency creates a new sync engine with consistency validation.
+func NewEngineWithConsistency(
+	conn connector.Connector,
+	s3 *storage.S3Client,
+	source string,
+	concurrency int,
+	objects []string,
+	consistencyConfig *config.ConsistencyConfig,
+	logger *slog.Logger,
+) *Engine {
+	var consistencyTracker *ConsistencyTracker
+	if consistencyConfig != nil && consistencyConfig.Enabled {
+		// Convert config.ConsistencyConfig to sync.ConsistencyConfig
+		syncConfig := ConsistencyConfig{
+			Enabled:         consistencyConfig.Enabled,
+			Relationships:   consistencyConfig.Relationships,
+			Windows:         consistencyConfig.Windows,
+			MaxStaleness:    consistencyConfig.MaxStaleness,
+			RequiredObjects: consistencyConfig.RequiredObjects,
+			FailOnViolation: consistencyConfig.FailOnViolation,
+		}
+		consistencyTracker = NewConsistencyTracker(s3, source, syncConfig, logger)
+	}
+
+	return &Engine{
+		connector:           conn,
+		s3:                  s3,
+		stateStore:          NewStateStore(s3, logger),
+		planner:             NewPlanner(logger),
+		writer:              storage.NewParquetWriter(s3, source, logger),
+		source:              source,
+		concurrency:         concurrency,
+		objects:             objects,
+		logger:              logger,
+		consistencyTracker:  consistencyTracker,
+		consistencyConfig:   consistencyConfig,
 	}
 }
 
@@ -125,7 +167,39 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	wg.Wait()
 
-	// 6. Update run state
+	// 6. Validate consistency (if enabled)
+	if e.consistencyTracker != nil {
+		e.logger.Info("validating sync consistency", "source", e.source)
+		report := e.consistencyTracker.ValidateSync(ctx, plans, state)
+
+		if report.HasViolations() {
+			e.logger.Warn("sync consistency violations detected",
+				"source", e.source,
+				"violations", len(report.Violations),
+				"critical_violations", report.HasCriticalViolations(),
+			)
+
+			// Store report for analysis
+			if err := e.consistencyTracker.StoreReport(ctx, report); err != nil {
+				e.logger.Warn("failed to store consistency report", "error", err)
+			}
+
+			// Update state with consistency information
+			state.LastConsistencyCheck = time.Now()
+			state.ConsistencyViolations = report.Violations
+
+			// Optionally fail the sync if configured to do so
+			if e.consistencyConfig != nil && e.consistencyConfig.FailOnViolation && report.HasCriticalViolations() {
+				return fmt.Errorf("sync failed due to critical consistency violations: %d violations detected", len(report.Violations))
+			}
+		} else {
+			e.logger.Info("sync consistency validation passed", "source", e.source)
+			state.LastConsistencyCheck = time.Now()
+			state.ConsistencyViolations = nil
+		}
+	}
+
+	// 7. Update run state
 	state.LastRunAt = time.Now()
 	state.RunCount++
 
