@@ -11,6 +11,7 @@ import (
 	"github.com/agentbrain/agentbrain/internal/connector"
 	"github.com/agentbrain/agentbrain/internal/storage"
 	"github.com/agentbrain/agentbrain/internal/storage/delta"
+	"github.com/agentbrain/agentbrain/internal/validation"
 )
 
 // Engine orchestrates the sync lifecycle: discover -> plan -> extract -> write -> commit.
@@ -27,6 +28,9 @@ type Engine struct {
 	logger              *slog.Logger
 	consistencyTracker  *ConsistencyTracker
 	consistencyConfig   *config.ConsistencyConfig
+	validator           validation.Validator
+	validationConfig    *config.ValidationConfig
+	metricsCollector    *validation.MetricsCollector
 }
 
 // NewEngine creates a new sync engine.
@@ -90,10 +94,98 @@ func NewEngineWithConsistency(
 	}
 }
 
+// NewEngineWithValidation creates a new sync engine with data validation.
+func NewEngineWithValidation(
+	conn connector.Connector,
+	s3 *storage.S3Client,
+	source string,
+	concurrency int,
+	objects []string,
+	consistencyConfig *config.ConsistencyConfig,
+	validationConfig *config.ValidationConfig,
+	logger *slog.Logger,
+) *Engine {
+	var consistencyTracker *ConsistencyTracker
+	if consistencyConfig != nil && consistencyConfig.Enabled {
+		// Convert config.ConsistencyConfig to sync.ConsistencyConfig
+		syncConfig := ConsistencyConfig{
+			Enabled:         consistencyConfig.Enabled,
+			Relationships:   consistencyConfig.Relationships,
+			Windows:         consistencyConfig.Windows,
+			MaxStaleness:    consistencyConfig.MaxStaleness,
+			RequiredObjects: consistencyConfig.RequiredObjects,
+			FailOnViolation: consistencyConfig.FailOnViolation,
+		}
+		consistencyTracker = NewConsistencyTracker(s3, source, syncConfig, logger)
+	}
+
+	var validator validation.Validator
+	var metricsCollector *validation.MetricsCollector
+	if validationConfig != nil && validationConfig.Enabled {
+		// Convert config custom rules to validation rules
+		customRules := make(map[string][]validation.Rule)
+		for objectName, rules := range validationConfig.CustomRules {
+			validationRules := make([]validation.Rule, 0, len(rules))
+			for _, rule := range rules {
+				validationRule := validation.Rule{
+					Field:    rule.Field,
+					Type:     rule.Type,
+					Pattern:  rule.Pattern,
+					Values:   rule.Values,
+					Required: rule.Required,
+				}
+				if rule.Min != nil {
+					validationRule.Min = rule.Min
+				}
+				if rule.Max != nil {
+					validationRule.Max = rule.Max
+				}
+				validationRules = append(validationRules, validationRule)
+			}
+			customRules[objectName] = validationRules
+		}
+
+		validatorConfig := validation.ValidatorConfig{
+			ErrorThreshold:  validationConfig.ErrorThreshold,
+			StrictMode:      validationConfig.StrictMode,
+			CustomRules:     customRules,
+			DriftThreshold:  validationConfig.DriftThreshold,
+			SamplingRate:    1.0, // Default to full validation
+			MaxSampleValues: 10,  // Default sample size
+		}
+		validator = validation.NewDefaultValidator(validatorConfig)
+		metricsCollector = validation.NewMetricsCollector(s3, logger)
+	}
+
+	return &Engine{
+		connector:           conn,
+		s3:                  s3,
+		stateStore:          NewStateStore(s3, logger),
+		planner:             NewPlanner(logger),
+		writer:              storage.NewParquetWriter(s3, source, logger),
+		source:              source,
+		concurrency:         concurrency,
+		objects:             objects,
+		logger:              logger,
+		consistencyTracker:  consistencyTracker,
+		consistencyConfig:   consistencyConfig,
+		validator:           validator,
+		validationConfig:    validationConfig,
+		metricsCollector:    metricsCollector,
+	}
+}
+
 // Run executes a full sync cycle.
 func (e *Engine) Run(ctx context.Context) error {
 	e.logger.Info("starting sync run", "source", e.source)
 	startTime := time.Now()
+	
+	// Create validation report if validation is enabled
+	var validationReport *validation.ValidationReport
+	if e.metricsCollector != nil {
+		syncID := fmt.Sprintf("sync_%d", startTime.Unix())
+		validationReport = e.metricsCollector.CreateReport(e.source, syncID)
+	}
 
 	// 1. Connect
 	if err := e.connector.Connect(ctx); err != nil {
@@ -147,6 +239,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	sem := make(chan struct{}, e.concurrency)
 	var mu sync.Mutex
 	var syncErrors []error
+	var objectValidationResults = make(map[string][]validation.BatchValidationResult)
 
 	var wg sync.WaitGroup
 	for _, plan := range plans {
@@ -157,10 +250,18 @@ func (e *Engine) Run(ctx context.Context) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			if err := e.syncObject(ctx, state, p); err != nil {
+			batchResults, err := e.syncObjectWithValidation(ctx, state, p)
+			if err != nil {
 				e.logger.Error("sync failed", "object", p.ObjectName, "error", err)
 				mu.Lock()
 				syncErrors = append(syncErrors, fmt.Errorf("%s: %w", p.ObjectName, err))
+				mu.Unlock()
+			}
+			
+			// Store validation results for reporting
+			if len(batchResults) > 0 {
+				mu.Lock()
+				objectValidationResults[p.ObjectName] = batchResults
 				mu.Unlock()
 			}
 		}(plan)
@@ -199,7 +300,40 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 	}
 
-	// 7. Update run state
+	// 7. Process validation results and generate report
+	if validationReport != nil && e.metricsCollector != nil {
+		e.logger.Info("processing validation results", "source", e.source)
+		
+		// Add object validation results to report
+		for objectName, batchResults := range objectValidationResults {
+			e.metricsCollector.AddObjectValidation(validationReport, objectName, batchResults)
+		}
+		
+		// Generate alerts based on validation results
+		if e.validationConfig != nil {
+			validatorConfig := validation.ValidatorConfig{
+				ErrorThreshold: e.validationConfig.ErrorThreshold,
+				DriftThreshold: e.validationConfig.DriftThreshold,
+			}
+			e.metricsCollector.GenerateAlerts(validationReport, validatorConfig)
+		}
+		
+		// Finalize and save validation report
+		e.metricsCollector.FinalizeReport(validationReport)
+		
+		if err := e.metricsCollector.SaveReport(ctx, validationReport); err != nil {
+			e.logger.Warn("failed to save validation report", "error", err)
+		} else {
+			e.logger.Info("validation report saved",
+				"overall_status", validationReport.Summary.OverallStatus,
+				"total_records", validationReport.Summary.TotalRecords,
+				"error_rate", validationReport.Summary.ErrorRate,
+				"alerts", len(validationReport.Alerts),
+			)
+		}
+	}
+
+	// 8. Update run state
 	state.LastRunAt = time.Now()
 	state.RunCount++
 
@@ -222,7 +356,15 @@ func (e *Engine) Run(ctx context.Context) error {
 	return nil
 }
 
-func (e *Engine) syncObject(ctx context.Context, state *SyncState, plan *ObjectPlan) error {
+// syncObjectWithValidation executes object sync with validation and returns batch results
+func (e *Engine) syncObjectWithValidation(ctx context.Context, state *SyncState, plan *ObjectPlan) ([]validation.BatchValidationResult, error) {
+	var batchResults []validation.BatchValidationResult
+	
+	err := e.syncObject(ctx, state, plan, &batchResults)
+	return batchResults, err
+}
+
+func (e *Engine) syncObject(ctx context.Context, state *SyncState, plan *ObjectPlan, batchResults *[]validation.BatchValidationResult) error {
 	e.logger.Info("syncing object",
 		"object", plan.ObjectName,
 		"mode", plan.Mode.String(),
@@ -260,6 +402,41 @@ func (e *Engine) syncObject(ctx context.Context, state *SyncState, plan *ObjectP
 	for batch := range recordsCh {
 		if len(batch.Records) == 0 {
 			continue
+		}
+
+		// Validate batch if validation is enabled
+		if e.validator != nil && batchResults != nil {
+			e.logger.Debug("validating batch", 
+				"object", plan.ObjectName, 
+				"records", len(batch.Records))
+			
+			validationResult := e.validator.ValidateBatch(&batch, plan.Schema)
+			*batchResults = append(*batchResults, validationResult)
+			
+			// Handle validation errors based on strict mode
+			if validationResult.HasErrors() && e.validationConfig != nil && e.validationConfig.StrictMode {
+				return fmt.Errorf("validation failed for %s: %d errors found (strict mode enabled)", 
+					plan.ObjectName, validationResult.ErrorRecords)
+			}
+			
+			// Log validation results
+			if validationResult.HasErrors() {
+				e.logger.Warn("validation errors detected",
+					"object", plan.ObjectName,
+					"error_records", validationResult.ErrorRecords,
+					"total_records", validationResult.TotalRecords,
+					"error_rate", validationResult.AggregatedMetrics.ErrorRate,
+				)
+			}
+			
+			if validationResult.HasWarnings() {
+				e.logger.Info("validation warnings detected",
+					"object", plan.ObjectName,
+					"warning_records", validationResult.WarningRecords,
+					"total_records", validationResult.TotalRecords,
+					"warning_rate", validationResult.AggregatedMetrics.WarningRate,
+				)
+			}
 		}
 
 		written, err := e.writer.WriteRecords(ctx, plan.ObjectName, plan.Schema, batch.Records)

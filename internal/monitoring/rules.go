@@ -207,3 +207,77 @@ func (r *APIResponseTimeRule) IsEnabled() bool {
 	return r.config.Enabled
 }
 
+// ValidationErrorRateRule monitors validation error rates
+type ValidationErrorRateRule struct {
+	config ValidationErrorRateConfig
+}
+
+type ValidationErrorRateConfig struct {
+	Enabled           bool    `json:"enabled"`
+	Threshold         float64 `json:"threshold"`          // Maximum acceptable error rate
+	CriticalThreshold float64 `json:"critical_threshold"` // Critical error rate threshold
+	Severity          string  `json:"severity"`
+}
+
+func NewValidationErrorRateRule(config ValidationErrorRateConfig) *ValidationErrorRateRule {
+	return &ValidationErrorRateRule{config: config}
+}
+
+func (r *ValidationErrorRateRule) Name() string {
+	return "validation_error_rate"
+}
+
+func (r *ValidationErrorRateRule) Check(ctx context.Context, snapshot MetricsSnapshot) (HealthStatus, string, error) {
+	// Note: This would need access to validation metrics from the snapshot
+	// For now, returning a placeholder implementation
+	return HealthStatusOK, "Validation error rate monitoring not yet implemented in metrics snapshot", nil
+}
+
+func (r *ValidationErrorRateRule) Severity() AlertSeverity {
+	if r.config.Severity != "" {
+		return AlertSeverity(r.config.Severity)
+	}
+	return AlertSeverityWarning
+}
+
+func (r *ValidationErrorRateRule) IsEnabled() bool {
+	return r.config.Enabled
+}
+
+// SchemaDriftRule monitors schema drift detection
+type SchemaDriftRule struct {
+	config SchemaDriftConfig
+}
+
+type SchemaDriftConfig struct {
+	Enabled           bool    `json:"enabled"`
+	DriftThreshold    float64 `json:"drift_threshold"`    // Drift score threshold
+	CriticalThreshold float64 `json:"critical_threshold"` // Critical drift threshold
+	Severity          string  `json:"severity"`
+}
+
+func NewSchemaDriftRule(config SchemaDriftConfig) *SchemaDriftRule {
+	return &SchemaDriftRule{config: config}
+}
+
+func (r *SchemaDriftRule) Name() string {
+	return "schema_drift"
+}
+
+func (r *SchemaDriftRule) Check(ctx context.Context, snapshot MetricsSnapshot) (HealthStatus, string, error) {
+	// Note: This would need access to drift metrics from the snapshot
+	// For now, returning a placeholder implementation
+	return HealthStatusOK, "Schema drift monitoring not yet implemented in metrics snapshot", nil
+}
+
+func (r *SchemaDriftRule) Severity() AlertSeverity {
+	if r.config.Severity != "" {
+		return AlertSeverity(r.config.Severity)
+	}
+	return AlertSeverityWarning
+}
+
+func (r *SchemaDriftRule) IsEnabled() bool {
+	return r.config.Enabled
+}
+

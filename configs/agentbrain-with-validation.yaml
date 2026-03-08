@@ -1,0 +1,189 @@
+# AgentBrain Configuration with Data Validation
+# This example shows how to configure comprehensive data validation
+# and schema drift detection for data quality assurance.
+
+agent:
+  log_level: info
+  log_format: json
+  health_addr: ":8080"
+  schedule: "@every 1h"
+  timeout: 30m
+
+storage:
+  bucket: "my-datalake"
+  region: "us-east-1"
+  prefix: "agentbrain"
+
+# Enable monitoring with validation alerts
+monitoring:
+  enabled: true
+  check_interval: 5m
+  alert_cooldown: 30m
+  
+  notification_channels:
+    - type: "log"
+      config:
+        level: "warn"
+  
+  rules:
+    # Data validation monitoring rules
+    validation_error_rate:
+      enabled: true
+      threshold: 0.05          # Alert if >5% validation errors
+      critical_threshold: 0.15 # Critical if >15% validation errors
+      severity: "warning"
+      
+    schema_drift:
+      enabled: true
+      drift_threshold: 0.10    # Alert if drift score >0.10
+      critical_threshold: 0.25 # Critical if drift score >0.25
+      severity: "warning"
+    
+    # System monitoring rules
+    disk_usage:
+      enabled: true
+      warning_threshold: 80.0
+      critical_threshold: 90.0
+      severity: "warning"
+
+sources:
+  # Production Salesforce with comprehensive validation
+  salesforce_prod:
+    type: salesforce
+    enabled: true
+    schedule: "@every 1h"
+    concurrency: 8
+    batch_size: 50000
+    
+    # Objects to sync
+    objects:
+      - Account
+      - Contact
+      - Opportunity
+      - Lead
+      - Case
+    
+    # Authentication
+    auth:
+      client_id: "${SF_CLIENT_ID}"
+      client_secret: "${SF_CLIENT_SECRET}"
+      username: "${SF_USERNAME}"
+      password: "${SF_PASSWORD}"
+      security_token: "${SF_SECURITY_TOKEN}"
+      login_url: "https://login.salesforce.com"
+    
+    # Comprehensive validation configuration
+    validation:
+      enabled: true
+      error_threshold: 0.05    # Alert if >5% of records have validation errors
+      drift_threshold: 0.10    # Alert if field patterns change >10%
+      strict_mode: false       # Log warnings instead of failing sync
+      
+      # Object-specific validation rules
+      custom_rules:
+        Account:
+          # Business validation for revenue
+          - field: "AnnualRevenue"
+            type: "range"
+            min: 0
+            max: 1000000000
+          # Enum validation for account type  
+          - field: "Type"
+            type: "enum"
+            values: ["Customer - Direct", "Customer - Channel", "Channel Partner / Reseller", "Installation Partner", "Technology Partner", "Other"]
+          # Revenue must be present for customers
+          - field: "AnnualRevenue"
+            required: true
+            
+        Contact:
+          # Age validation
+          - field: "Age__c"
+            type: "range"
+            min: 0
+            max: 120
+          # Lead source validation
+          - field: "LeadSource"
+            type: "enum"
+            values: ["Web", "Phone Inquiry", "Partner Referral", "Purchased List", "Other"]
+            
+        Opportunity:
+          # Amount validation
+          - field: "Amount"
+            type: "range"
+            min: 0
+            max: 10000000
+          # Stage validation
+          - field: "StageName"
+            type: "enum"
+            values: ["Prospecting", "Qualification", "Needs Analysis", "Value Proposition", "Id. Decision Makers", "Proposal/Price Quote", "Negotiation/Review", "Closed Won", "Closed Lost"]
+          # Probability validation
+          - field: "Probability"
+            type: "range"
+            min: 0
+            max: 100
+            
+        Lead:
+          # Lead status validation
+          - field: "Status"
+            type: "enum"
+            values: ["Open - Not Contacted", "Working - Contacted", "Closed - Converted", "Closed - Not Converted"]
+          # Rating validation  
+          - field: "Rating"
+            type: "enum"
+            values: ["Hot", "Warm", "Cold"]
+            
+        Case:
+          # Priority validation
+          - field: "Priority"
+            type: "enum"
+            values: ["High", "Medium", "Low"]
+          # Status validation
+          - field: "Status"
+            type: "enum"
+            values: ["New", "Working", "Escalated", "Closed"]
+
+  # Salesforce Sandbox with basic validation for testing
+  salesforce_sandbox:
+    type: salesforce
+    enabled: false
+    schedule: "@every 6h"
+    concurrency: 2
+    
+    objects:
+      - Account
+      - Contact
+    
+    auth:
+      client_id: "${SF_SANDBOX_CLIENT_ID}"
+      client_secret: "${SF_SANDBOX_CLIENT_SECRET}"
+      username: "${SF_SANDBOX_USERNAME}"
+      password: "${SF_SANDBOX_PASSWORD}"
+      security_token: "${SF_SANDBOX_SECURITY_TOKEN}"
+      login_url: "https://test.salesforce.com"
+    
+    # Basic validation for sandbox
+    validation:
+      enabled: true
+      error_threshold: 0.10    # More lenient for sandbox
+      drift_threshold: 0.20    # Allow more drift in sandbox
+      strict_mode: false
+      
+      custom_rules:
+        Account:
+          - field: "Type"
+            type: "enum"
+            values: ["Customer", "Partner", "Prospect"]
+        Contact:
+          - field: "LeadSource"
+            type: "enum"
+            values: ["Web", "Phone", "Partner", "Other"]
+
+# Optional: Backup configuration with validation
+backup:
+  enabled: true
+  destination_bucket: "my-datalake-backup"
+  destination_region: "us-west-2"
+  schedule: "@daily"
+  retention_days: 30
+  cross_region: true
+  validation_mode: "checksum"

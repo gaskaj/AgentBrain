@@ -104,6 +104,81 @@ backup:
 | `auth` | map | - | Key-value pairs for authentication. Keys are connector-specific. |
 | `options` | map | - | Key-value pairs for additional connector-specific settings. |
 | `checkpoint` | map | - | Checkpoint management configuration. See below for options. |
+| `validation` | map | - | Data validation and drift detection configuration. See below for options. |
+
+### Data Validation Configuration
+
+Each source can include comprehensive data validation settings:
+
+```yaml
+sources:
+  salesforce_prod:
+    validation:
+      enabled: true
+      error_threshold: 0.05      # Alert if >5% of records have errors
+      drift_threshold: 0.10      # Alert if field patterns change >10%
+      strict_mode: false         # Fail sync on validation errors
+      custom_rules:              # Object-specific validation rules
+        Account:
+          - field: "AnnualRevenue"
+            type: "range"
+            min: 0
+            max: 1000000000
+          - field: "Type"
+            type: "enum"
+            values: ["Customer", "Partner", "Prospect"]
+        Contact:
+          - field: "Email"
+            type: "format"
+            pattern: "email"
+          - field: "Age"
+            type: "range"
+            min: 0
+            max: 150
+            required: true
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Enable data validation framework |
+| `error_threshold` | float | `0.05` | Maximum error rate before alerting (0-1) |
+| `drift_threshold` | float | `0.10` | Maximum drift score before alerting (0-1) |
+| `strict_mode` | bool | `false` | Fail sync on validation errors vs log warnings |
+| `custom_rules` | map | `{}` | Object-specific validation rules |
+
+#### Custom Validation Rules
+
+Custom rules enforce business-specific data constraints per object:
+
+**Range Rules** - Validate numeric fields are within bounds:
+```yaml
+- field: "Price"
+  type: "range"
+  min: 0.01
+  max: 10000.00
+```
+
+**Enum Rules** - Validate string fields contain only allowed values:
+```yaml
+- field: "Status"
+  type: "enum"
+  values: ["pending", "shipped", "delivered", "cancelled"]
+```
+
+**Format Rules** - Validate string fields match regex patterns:
+```yaml
+- field: "CustomerID"
+  type: "format"
+  pattern: "^CUST-[0-9]{6}$"
+```
+
+The system also applies built-in validation rules automatically:
+- **Type Consistency**: Field types match schema declarations
+- **Null Constraints**: Non-nullable fields don't contain nulls
+- **Format Detection**: Auto-validates emails, phones, URLs based on field names
+- **Data Quality**: Detects placeholder values, whitespace issues, suspicious patterns
+
+For detailed validation configuration, see [Data Validation Guide](data-validation.md).
 
 ### Checkpoint Configuration
 

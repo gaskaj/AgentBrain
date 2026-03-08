@@ -54,3 +54,23 @@ func (Layout) SchemaHistoryPrefix(source, object string) string {
 func (Layout) Catalog(source string) string {
 	return fmt.Sprintf("metadata/%s/catalog.json", source)
 }
+
+// ValidationReport returns the path to a validation report.
+func (Layout) ValidationReport(source, syncID string) string {
+	return fmt.Sprintf("validation/%s/reports/%s.json", source, syncID)
+}
+
+// ValidationReportsPrefix returns the prefix for all validation reports of a source.
+func (Layout) ValidationReportsPrefix(source string) string {
+	return fmt.Sprintf("validation/%s/reports/", source)
+}
+
+// DriftMetrics returns the path to drift metrics for an object.
+func (Layout) DriftMetrics(source, object string) string {
+	return fmt.Sprintf("validation/%s/%s/drift_metrics.json", source, object)
+}
+
+// FieldSnapshots returns the path to field snapshots for an object.
+func (Layout) FieldSnapshots(source, object string) string {
+	return fmt.Sprintf("validation/%s/%s/field_snapshots.json", source, object)
+}
