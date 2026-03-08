@@ -19,6 +19,7 @@ type Config struct {
 	Backup     *BackupConfig                    `yaml:"backup,omitempty"`
 	Profiler   *ProfilerConfig                  `yaml:"profiler,omitempty"`
 	Plugins    *PluginConfig                    `yaml:"plugins,omitempty"`
+	Retry      *RetryConfig                     `yaml:"retry,omitempty"`
 }
 
 type AgentConfig struct {
@@ -135,6 +136,31 @@ type PluginSecurityConfig struct {
 	AllowedHosts     []string          `yaml:"allowed_hosts"`
 	AllowedEnvVars   map[string]string `yaml:"allowed_env_vars"`
 	SandboxEnabled   bool              `yaml:"sandbox_enabled"`
+}
+
+// RetryConfig holds the retry framework configuration.
+type RetryConfig struct {
+	DefaultPolicy     RetryPolicyConfig                    `yaml:"default_policy"`
+	CircuitBreakers   map[string]CircuitBreakerConfig      `yaml:"circuit_breakers"`
+	OperationPolicies map[string]RetryPolicyConfig         `yaml:"operation_policies"`
+}
+
+// RetryPolicyConfig represents the configuration for a retry policy.
+type RetryPolicyConfig struct {
+	MaxAttempts        int           `yaml:"max_attempts"`
+	BaseDelay          time.Duration `yaml:"base_delay"`
+	MaxDelay           time.Duration `yaml:"max_delay"`
+	BackoffStrategy    string        `yaml:"backoff_strategy"`
+	Jitter             bool          `yaml:"jitter"`
+	RetryableErrors    []string      `yaml:"retryable_errors,omitempty"`
+	NonRetryableErrors []string      `yaml:"non_retryable_errors,omitempty"`
+}
+
+// CircuitBreakerConfig represents the configuration for a circuit breaker.
+type CircuitBreakerConfig struct {
+	FailureThreshold int           `yaml:"failure_threshold"`
+	ResetTimeout     time.Duration `yaml:"reset_timeout"`
+	Enabled          bool          `yaml:"enabled"`
 }
 
 func Load(path string) (*Config, error) {
@@ -260,6 +286,11 @@ func setDefaults(cfg *Config) {
 	if cfg.Plugins != nil {
 		setPluginDefaults(cfg.Plugins)
 	}
+
+	// Set retry defaults if retry config is provided
+	if cfg.Retry != nil {
+		setRetryDefaults(cfg.Retry)
+	}
 }
 
 func setCheckpointDefaults(cp *CheckpointConfig) {
@@ -332,6 +363,116 @@ func setPluginDefaults(pg *PluginConfig) {
 		if pg.Security.AllowedEnvVars == nil {
 			pg.Security.AllowedEnvVars = make(map[string]string)
 		}
+	}
+}
+
+func setRetryDefaults(rt *RetryConfig) {
+	// Set default policy defaults
+	if rt.DefaultPolicy.MaxAttempts <= 0 {
+		rt.DefaultPolicy.MaxAttempts = 3
+	}
+	if rt.DefaultPolicy.BaseDelay <= 0 {
+		rt.DefaultPolicy.BaseDelay = time.Second
+	}
+	if rt.DefaultPolicy.MaxDelay <= 0 {
+		rt.DefaultPolicy.MaxDelay = 30 * time.Second
+	}
+	if rt.DefaultPolicy.BackoffStrategy == "" {
+		rt.DefaultPolicy.BackoffStrategy = "exponential_jitter"
+	}
+
+	// Initialize maps if nil
+	if rt.CircuitBreakers == nil {
+		rt.CircuitBreakers = make(map[string]CircuitBreakerConfig)
+	}
+	if rt.OperationPolicies == nil {
+		rt.OperationPolicies = make(map[string]RetryPolicyConfig)
+	}
+
+	// Set default circuit breakers if none configured
+	if len(rt.CircuitBreakers) == 0 {
+		rt.CircuitBreakers["s3_operations"] = CircuitBreakerConfig{
+			FailureThreshold: 5,
+			ResetTimeout:     60 * time.Second,
+			Enabled:          true,
+		}
+		rt.CircuitBreakers["connector_auth"] = CircuitBreakerConfig{
+			FailureThreshold: 3,
+			ResetTimeout:     5 * time.Minute,
+			Enabled:          true,
+		}
+		rt.CircuitBreakers["api_operations"] = CircuitBreakerConfig{
+			FailureThreshold: 10,
+			ResetTimeout:     2 * time.Minute,
+			Enabled:          true,
+		}
+	}
+
+	// Set default operation policies if none configured
+	if len(rt.OperationPolicies) == 0 {
+		rt.OperationPolicies["s3_upload"] = RetryPolicyConfig{
+			MaxAttempts:     5,
+			BaseDelay:       2 * time.Second,
+			MaxDelay:        120 * time.Second,
+			BackoffStrategy: "exponential",
+			Jitter:          true,
+		}
+		rt.OperationPolicies["s3_download"] = RetryPolicyConfig{
+			MaxAttempts:     5,
+			BaseDelay:       time.Second,
+			MaxDelay:        60 * time.Second,
+			BackoffStrategy: "exponential",
+			Jitter:          true,
+		}
+		rt.OperationPolicies["delta_commit"] = RetryPolicyConfig{
+			MaxAttempts:     3,
+			BaseDelay:       500 * time.Millisecond,
+			MaxDelay:        10 * time.Second,
+			BackoffStrategy: "linear",
+			Jitter:          false,
+		}
+		rt.OperationPolicies["connector_auth"] = RetryPolicyConfig{
+			MaxAttempts:     3,
+			BaseDelay:       2 * time.Second,
+			MaxDelay:        30 * time.Second,
+			BackoffStrategy: "fixed",
+			Jitter:          false,
+		}
+		rt.OperationPolicies["api_request"] = RetryPolicyConfig{
+			MaxAttempts:     4,
+			BaseDelay:       time.Second,
+			MaxDelay:        30 * time.Second,
+			BackoffStrategy: "api_rate_limit",
+			Jitter:          true,
+		}
+	}
+
+	// Set defaults for each circuit breaker
+	for name, cb := range rt.CircuitBreakers {
+		if cb.FailureThreshold <= 0 {
+			cb.FailureThreshold = 5
+		}
+		if cb.ResetTimeout <= 0 {
+			cb.ResetTimeout = time.Minute
+		}
+		rt.CircuitBreakers[name] = cb
+	}
+
+	// Set defaults for each operation policy
+	for name, policy := range rt.OperationPolicies {
+		if policy.MaxAttempts <= 0 {
+			policy.MaxAttempts = rt.DefaultPolicy.MaxAttempts
+		}
+		if policy.BaseDelay <= 0 {
+			policy.BaseDelay = rt.DefaultPolicy.BaseDelay
+		}
+		if policy.MaxDelay <= 0 {
+			policy.MaxDelay = rt.DefaultPolicy.MaxDelay
+		}
+		if policy.BackoffStrategy == "" {
+			policy.BackoffStrategy = rt.DefaultPolicy.BackoffStrategy
+		}
+		rt.OperationPolicies[name] = policy
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+	
+	"github.com/agentbrain/agentbrain/internal/retry"
 )
 
 // Snapshot represents the state of a Delta table at a specific version.
@@ -22,16 +24,23 @@ type DeltaTable struct {
 	source            string
 	object            string
 	logger            *slog.Logger
+	retryPolicy       *retry.RetryPolicy
+	circuitBreaker    *retry.CircuitBreaker
 }
 
 // NewDeltaTable creates a new DeltaTable manager.
 func NewDeltaTable(store S3Store, source, object, logPrefix string, logger *slog.Logger) *DeltaTable {
-	return &DeltaTable{
+	table := &DeltaTable{
 		log:    NewTransactionLog(store, logPrefix),
 		source: source,
 		object: object,
 		logger: logger,
 	}
+	
+	// Initialize retry policies for Delta operations
+	table.initializeRetryPolicies()
+	
+	return table
 }
 
 // NewDeltaTableWithCheckpoints creates a DeltaTable with comprehensive checkpoint management.
@@ -45,6 +54,9 @@ func NewDeltaTableWithCheckpoints(store S3Store, source, object, logPrefix strin
 	
 	lastCheckpointKey := fmt.Sprintf("%s_last_checkpoint", logPrefix)
 	table.checkpointManager = NewCheckpointManager(store, table, config, lastCheckpointKey, logPrefix, logger)
+	
+	// Initialize retry policies for Delta operations
+	table.initializeRetryPolicies()
 	
 	return table
 }
@@ -76,36 +88,46 @@ func (t *DeltaTable) Initialize(ctx context.Context, schemaString string) error 
 
 // Commit appends a new version to the Delta log with the given actions.
 func (t *DeltaTable) Commit(ctx context.Context, actions []Action, operation string) (int64, error) {
-	latest, err := t.log.LatestVersion(ctx)
-	if err != nil {
-		return -1, fmt.Errorf("get latest version: %w", err)
-	}
-
-	newVersion := latest + 1
-
-	commitInfo := NewCommitInfoAction(operation, latest, true)
-	allActions := append(actions, commitInfo)
-
-	if err := t.log.WriteVersion(ctx, newVersion, allActions); err != nil {
-		return -1, fmt.Errorf("commit version %d: %w", newVersion, err)
-	}
-
-	// Create checkpoint if checkpoint manager is available
-	if t.checkpointManager != nil {
-		if err := t.checkpointManager.MaybeCheckpoint(ctx, newVersion); err != nil {
-			t.logger.Warn("checkpoint creation failed", "version", newVersion, "error", err)
-			// Don't fail the commit if checkpoint fails
+	commitOp := func(ctx context.Context) (int64, error) {
+		latest, err := t.log.LatestVersion(ctx)
+		if err != nil {
+			return -1, fmt.Errorf("get latest version: %w", err)
 		}
+
+		newVersion := latest + 1
+
+		commitInfo := NewCommitInfoAction(operation, latest, true)
+		allActions := append(actions, commitInfo)
+
+		if err := t.log.WriteVersion(ctx, newVersion, allActions); err != nil {
+			return -1, fmt.Errorf("commit version %d: %w", newVersion, err)
+		}
+
+		// Create checkpoint if checkpoint manager is available
+		if t.checkpointManager != nil {
+			if err := t.checkpointManager.MaybeCheckpoint(ctx, newVersion); err != nil {
+				t.logger.Warn("checkpoint creation failed", "version", newVersion, "error", err)
+				// Don't fail the commit if checkpoint fails
+			}
+		}
+
+		t.logger.Info("committed delta version",
+			"source", t.source,
+			"object", t.object,
+			"version", newVersion,
+			"actions", len(actions),
+		)
+
+		return newVersion, nil
 	}
 
-	t.logger.Info("committed delta version",
-		"source", t.source,
-		"object", t.object,
-		"version", newVersion,
-		"actions", len(actions),
-	)
+	// Execute commit with retry and circuit breaker protection
+	if t.retryPolicy != nil && t.circuitBreaker != nil {
+		return retry.ExecuteWithRetryAndCircuitBreaker(ctx, t.retryPolicy, t.circuitBreaker, commitOp)
+	}
 
-	return newVersion, nil
+	// Fallback to direct execution
+	return commitOp(ctx)
 }
 
 // Snapshot replays the transaction log up to the given version and returns the table state.
@@ -178,6 +200,32 @@ func (t *DeltaTable) GetCheckpointManager() *CheckpointManager {
 // SetCheckpointManager sets the checkpoint manager for the table.
 func (t *DeltaTable) SetCheckpointManager(manager *CheckpointManager) {
 	t.checkpointManager = manager
+}
+
+// initializeRetryPolicies sets up retry policies for Delta table operations.
+func (t *DeltaTable) initializeRetryPolicies() {
+	// Create retry policy optimized for Delta operations
+	t.retryPolicy = &retry.RetryPolicy{
+		MaxAttempts:   3,
+		BaseDelay:     500 * time.Millisecond,
+		MaxDelay:      10 * time.Second,
+		BackoffFunc:   retry.LinearBackoff,
+		RetryableFunc: retry.DefaultRetryableFunc,
+		Jitter:        false, // Delta operations should be predictable
+	}
+	
+	// Create circuit breaker for Delta operations
+	t.circuitBreaker = retry.NewCircuitBreaker("delta_operations", 5, 2*time.Minute)
+}
+
+// SetRetryPolicy allows customizing the retry policy for Delta operations.
+func (t *DeltaTable) SetRetryPolicy(policy *retry.RetryPolicy) {
+	t.retryPolicy = policy
+}
+
+// SetCircuitBreaker allows customizing the circuit breaker for Delta operations.
+func (t *DeltaTable) SetCircuitBreaker(cb *retry.CircuitBreaker) {
+	t.circuitBreaker = cb
 }
 
 // CreateBackup creates a backup of this table at the specified version

@@ -28,6 +28,40 @@ type DeltaMetrics struct {
 	TableMetrics          map[string]TableMetrics    `json:"table_metrics"`
 }
 
+// RetrySystemMetrics contains retry and circuit breaker metrics.
+type RetrySystemMetrics struct {
+	TotalRetryAttempts     int64                          `json:"total_retry_attempts"`
+	SuccessfulRetries      int64                          `json:"successful_retries"`
+	FailedRetries          int64                          `json:"failed_retries"`
+	OverallSuccessRate     float64                        `json:"overall_success_rate"`
+	CircuitBreakersOpen    int                            `json:"circuit_breakers_open"`
+	TotalCircuitBreakers   int                            `json:"total_circuit_breakers"`
+	OperationMetrics       map[string]RetryOperationMetrics `json:"operation_metrics"`
+	CircuitBreakerMetrics  map[string]CircuitBreakerStatus  `json:"circuit_breaker_metrics"`
+	LastMetricsUpdate      time.Time                      `json:"last_metrics_update"`
+}
+
+// RetryOperationMetrics contains metrics for a specific retry operation.
+type RetryOperationMetrics struct {
+	Operation         string        `json:"operation"`
+	TotalAttempts     int64         `json:"total_attempts"`
+	SuccessfulRetries int64         `json:"successful_retries"`
+	FailedRetries     int64         `json:"failed_retries"`
+	AverageDelay      time.Duration `json:"average_delay"`
+	SuccessRate       float64       `json:"success_rate"`
+	LastAttempt       time.Time     `json:"last_attempt"`
+}
+
+// CircuitBreakerStatus contains the status of a circuit breaker.
+type CircuitBreakerStatus struct {
+	Name            string    `json:"name"`
+	State           string    `json:"state"`
+	RequestCount    int64     `json:"request_count"`
+	FailureRate     float64   `json:"failure_rate"`
+	LastFailure     time.Time `json:"last_failure"`
+	StateTransitions int64    `json:"state_transitions"`
+}
+
 // TableMetrics contains metrics for individual Delta tables.
 type TableMetrics struct {
 	Source               string        `json:"source"`
@@ -43,7 +77,9 @@ type TableMetrics struct {
 // MetricsCollector collects and aggregates Delta Lake metrics.
 type MetricsCollector struct {
 	mu            sync.RWMutex
-	deltaMetrics  DeltaMetrics
+	deltaMetrics      DeltaMetrics
+	retryMetrics      RetrySystemMetrics
+	retryEnabled      bool
 }
 
 // NewMetricsCollector creates a new metrics collector.
@@ -51,6 +87,10 @@ func NewMetricsCollector() *MetricsCollector {
 	return &MetricsCollector{
 		deltaMetrics: DeltaMetrics{
 			TableMetrics: make(map[string]TableMetrics),
+		},
+		retryMetrics: RetrySystemMetrics{
+			OperationMetrics:      make(map[string]RetryOperationMetrics),
+			CircuitBreakerMetrics: make(map[string]CircuitBreakerStatus),
 		},
 	}
 }
@@ -231,4 +271,190 @@ func (mc *MetricsCollector) Reset() {
 	mc.deltaMetrics = DeltaMetrics{
 		TableMetrics: make(map[string]TableMetrics),
 	}
+	mc.retryMetrics = RetrySystemMetrics{
+		OperationMetrics:      make(map[string]RetryOperationMetrics),
+		CircuitBreakerMetrics: make(map[string]CircuitBreakerStatus),
+	}
+}
+
+// EnableRetryMetrics enables retry metrics collection.
+func (mc *MetricsCollector) EnableRetryMetrics() {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.retryEnabled = true
+}
+
+// RecordRetryAttempt records a retry attempt for an operation.
+func (mc *MetricsCollector) RecordRetryAttempt(operation string, success bool, delay time.Duration) {
+	if !mc.retryEnabled {
+		return
+	}
+	
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	
+	metrics, exists := mc.retryMetrics.OperationMetrics[operation]
+	if !exists {
+		metrics = RetryOperationMetrics{
+			Operation: operation,
+		}
+	}
+	
+	metrics.TotalAttempts++
+	metrics.LastAttempt = time.Now()
+	
+	if success {
+		metrics.SuccessfulRetries++
+		mc.retryMetrics.SuccessfulRetries++
+	} else {
+		metrics.FailedRetries++
+		mc.retryMetrics.FailedRetries++
+	}
+	
+	mc.retryMetrics.TotalRetryAttempts++
+	
+	// Calculate success rate
+	if metrics.TotalAttempts > 0 {
+		metrics.SuccessRate = float64(metrics.SuccessfulRetries) / float64(metrics.TotalAttempts)
+	}
+	
+	// Update average delay (simple moving average approximation)
+	if metrics.AverageDelay == 0 {
+		metrics.AverageDelay = delay
+	} else {
+		metrics.AverageDelay = (metrics.AverageDelay + delay) / 2
+	}
+	
+	mc.retryMetrics.OperationMetrics[operation] = metrics
+	
+	// Update overall success rate
+	if mc.retryMetrics.TotalRetryAttempts > 0 {
+		mc.retryMetrics.OverallSuccessRate = float64(mc.retryMetrics.SuccessfulRetries) / float64(mc.retryMetrics.TotalRetryAttempts)
+	}
+	
+	mc.retryMetrics.LastMetricsUpdate = time.Now()
+}
+
+// RecordCircuitBreakerState records the state of a circuit breaker.
+func (mc *MetricsCollector) RecordCircuitBreakerState(name, state string, requestCount, failureCount int64, lastFailure time.Time) {
+	if !mc.retryEnabled {
+		return
+	}
+	
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	
+	status, exists := mc.retryMetrics.CircuitBreakerMetrics[name]
+	if !exists {
+		status = CircuitBreakerStatus{Name: name}
+		mc.retryMetrics.TotalCircuitBreakers++
+	}
+	
+	// Track state transitions
+	if status.State != "" && status.State != state {
+		status.StateTransitions++
+	}
+	
+	// Update open circuit breaker count
+	if status.State != "OPEN" && state == "OPEN" {
+		mc.retryMetrics.CircuitBreakersOpen++
+	} else if status.State == "OPEN" && state != "OPEN" {
+		mc.retryMetrics.CircuitBreakersOpen--
+	}
+	
+	status.State = state
+	status.RequestCount = requestCount
+	status.LastFailure = lastFailure
+	
+	// Calculate failure rate
+	if requestCount > 0 {
+		status.FailureRate = float64(failureCount) / float64(requestCount)
+	}
+	
+	mc.retryMetrics.CircuitBreakerMetrics[name] = status
+	mc.retryMetrics.LastMetricsUpdate = time.Now()
+}
+
+// GetRetryMetrics returns current retry system metrics.
+func (mc *MetricsCollector) GetRetryMetrics() RetrySystemMetrics {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	
+	// Return a deep copy to avoid race conditions
+	metrics := mc.retryMetrics
+	
+	// Copy operation metrics map
+	metrics.OperationMetrics = make(map[string]RetryOperationMetrics)
+	for k, v := range mc.retryMetrics.OperationMetrics {
+		metrics.OperationMetrics[k] = v
+	}
+	
+	// Copy circuit breaker metrics map
+	metrics.CircuitBreakerMetrics = make(map[string]CircuitBreakerStatus)
+	for k, v := range mc.retryMetrics.CircuitBreakerMetrics {
+		metrics.CircuitBreakerMetrics[k] = v
+	}
+	
+	return metrics
+}
+
+// GetRetryHealthScore calculates a health score for the retry system (0-100).
+func (mc *MetricsCollector) GetRetryHealthScore() float64 {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	
+	if !mc.retryEnabled {
+		return 100.0 // If retry system not used, consider it healthy
+	}
+	
+	score := 100.0
+	
+	// Penalize low overall success rate
+	if mc.retryMetrics.TotalRetryAttempts > 10 { // Only if significant sample size
+		successRatePenalty := (1.0 - mc.retryMetrics.OverallSuccessRate) * 40.0 // Max 40 point penalty
+		score -= successRatePenalty
+	}
+	
+	// Penalize open circuit breakers
+	if mc.retryMetrics.TotalCircuitBreakers > 0 {
+		openRatio := float64(mc.retryMetrics.CircuitBreakersOpen) / float64(mc.retryMetrics.TotalCircuitBreakers)
+		openPenalty := openRatio * 30.0 // Max 30 point penalty for all breakers open
+		score -= openPenalty
+	}
+	
+	// Penalize high failure rates on individual operations
+	highFailureOps := 0
+	for _, opMetrics := range mc.retryMetrics.OperationMetrics {
+		if opMetrics.TotalAttempts > 5 && opMetrics.SuccessRate < 0.8 {
+			highFailureOps++
+		}
+	}
+	
+	if len(mc.retryMetrics.OperationMetrics) > 0 {
+		highFailureRatio := float64(highFailureOps) / float64(len(mc.retryMetrics.OperationMetrics))
+		highFailurePenalty := highFailureRatio * 20.0 // Max 20 point penalty
+		score -= highFailurePenalty
+	}
+	
+	// Penalize stale metrics (no recent activity)
+	if !mc.retryMetrics.LastMetricsUpdate.IsZero() {
+		hoursSinceUpdate := time.Since(mc.retryMetrics.LastMetricsUpdate).Hours()
+		if hoursSinceUpdate > 1 {
+			stalePenalty := (hoursSinceUpdate - 1) * 2 // 2 points per hour after 1h
+			if stalePenalty > 10 {
+				stalePenalty = 10 // Max 10 point penalty
+			}
+			score -= stalePenalty
+		}
+	}
+	
+	// Ensure score is within bounds
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	
+	return score
 }
