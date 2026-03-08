@@ -37,17 +37,18 @@ type StorageConfig struct {
 }
 
 type SourceConfig struct {
-	Type        string                 `yaml:"type"`
-	Enabled     bool                   `yaml:"enabled"`
-	Schedule    string                 `yaml:"schedule"`
-	Concurrency int                   `yaml:"concurrency"`
-	BatchSize   int                   `yaml:"batch_size"`
-	Objects     []string               `yaml:"objects"`
-	Auth        map[string]string      `yaml:"auth"`
-	Options     map[string]string      `yaml:"options"`
-	Checkpoint  *CheckpointConfig      `yaml:"checkpoint,omitempty"`
-	Consistency *ConsistencyConfig     `yaml:"consistency,omitempty"`
-	Validation  *ValidationConfig      `yaml:"validation,omitempty"`
+	Type         string                 `yaml:"type"`
+	Enabled      bool                   `yaml:"enabled"`
+	Schedule     string                 `yaml:"schedule"`
+	Concurrency  int                   `yaml:"concurrency"`
+	BatchSize    int                   `yaml:"batch_size"`
+	Objects      []string               `yaml:"objects"`
+	Auth         map[string]string      `yaml:"auth"`
+	Options      map[string]string      `yaml:"options"`
+	Checkpoint   *CheckpointConfig      `yaml:"checkpoint,omitempty"`
+	Consistency  *ConsistencyConfig     `yaml:"consistency,omitempty"`
+	Validation   *ValidationConfig      `yaml:"validation,omitempty"`
+	ErrorHandling *ErrorHandlingConfig  `yaml:"error_handling,omitempty"`
 }
 
 type ConsistencyConfig struct {
@@ -85,6 +86,16 @@ type CustomRule struct {
 	Pattern  string    `yaml:"pattern,omitempty"`
 	Values   []string  `yaml:"values,omitempty"`
 	Required bool      `yaml:"required"`
+}
+
+type ErrorHandlingConfig struct {
+	MaxRetries             int           `yaml:"max_retries"`
+	BaseDelay              time.Duration `yaml:"base_delay"`
+	MaxDelay               time.Duration `yaml:"max_delay"`
+	CircuitBreakerThreshold int           `yaml:"circuit_breaker_threshold"`
+	CircuitBreakerTimeout   time.Duration `yaml:"circuit_breaker_timeout"`
+	PartialRecovery         bool          `yaml:"partial_recovery"`
+	SkipFailedObjects       bool          `yaml:"skip_failed_objects"`
 }
 
 type BackupConfig struct {
@@ -228,6 +239,11 @@ func setDefaults(cfg *Config) {
 		if src.Checkpoint != nil {
 			setCheckpointDefaults(src.Checkpoint)
 		}
+		
+		// Set error handling defaults if error handling config is provided
+		if src.ErrorHandling != nil {
+			setErrorHandlingDefaults(src.ErrorHandling)
+		}
 	}
 
 	// Set backup defaults if backup config is provided
@@ -316,6 +332,24 @@ func setPluginDefaults(pg *PluginConfig) {
 		if pg.Security.AllowedEnvVars == nil {
 			pg.Security.AllowedEnvVars = make(map[string]string)
 		}
+	}
+}
+
+func setErrorHandlingDefaults(eh *ErrorHandlingConfig) {
+	if eh.MaxRetries <= 0 {
+		eh.MaxRetries = 3
+	}
+	if eh.BaseDelay <= 0 {
+		eh.BaseDelay = 1 * time.Second
+	}
+	if eh.MaxDelay <= 0 {
+		eh.MaxDelay = 60 * time.Second
+	}
+	if eh.CircuitBreakerThreshold <= 0 {
+		eh.CircuitBreakerThreshold = 5
+	}
+	if eh.CircuitBreakerTimeout <= 0 {
+		eh.CircuitBreakerTimeout = 2 * time.Minute
 	}
 }
 
