@@ -17,6 +17,7 @@ type Config struct {
 	Sources    map[string]*SourceConfig         `yaml:"sources"`
 	Monitoring monitoring.MonitoringConfig     `yaml:"monitoring"`
 	Backup     *BackupConfig                    `yaml:"backup,omitempty"`
+	Profiler   *ProfilerConfig                  `yaml:"profiler,omitempty"`
 }
 
 type AgentConfig struct {
@@ -96,6 +97,15 @@ type BackupConfig struct {
 	ValidationMode    string `yaml:"validation_mode"` // "checksum", "full", "none"
 	ConcurrentUploads int    `yaml:"concurrent_uploads"`
 	ChunkSizeMB       int    `yaml:"chunk_size_mb"`
+}
+
+type ProfilerConfig struct {
+	Enabled               bool          `yaml:"enabled"`
+	SampleRate            float64       `yaml:"sample_rate"`
+	OutputDir             string        `yaml:"output_dir"`
+	CPUProfileDuration    time.Duration `yaml:"cpu_profile_duration"`
+	MemoryProfileInterval time.Duration `yaml:"memory_profile_interval"`
+	GoroutineThreshold    int           `yaml:"goroutine_threshold"`
 }
 
 func Load(path string) (*Config, error) {
@@ -206,6 +216,11 @@ func setDefaults(cfg *Config) {
 	if cfg.Backup != nil {
 		setBackupDefaults(cfg.Backup)
 	}
+
+	// Set profiler defaults if profiler config is provided
+	if cfg.Profiler != nil {
+		setProfilerDefaults(cfg.Profiler)
+	}
 }
 
 func setCheckpointDefaults(cp *CheckpointConfig) {
@@ -238,6 +253,24 @@ func setBackupDefaults(bp *BackupConfig) {
 	}
 	if bp.ChunkSizeMB <= 0 {
 		bp.ChunkSizeMB = 64 // 64MB chunks
+	}
+}
+
+func setProfilerDefaults(pf *ProfilerConfig) {
+	if pf.SampleRate <= 0 {
+		pf.SampleRate = 0.1 // Sample 10% of operations by default
+	}
+	if pf.OutputDir == "" {
+		pf.OutputDir = "./profiles"
+	}
+	if pf.CPUProfileDuration <= 0 {
+		pf.CPUProfileDuration = 30 * time.Second
+	}
+	if pf.MemoryProfileInterval <= 0 {
+		pf.MemoryProfileInterval = 5 * time.Minute
+	}
+	if pf.GoroutineThreshold <= 0 {
+		pf.GoroutineThreshold = 1000
 	}
 }
 
