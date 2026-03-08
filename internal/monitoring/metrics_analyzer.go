@@ -183,6 +183,14 @@ func (ma *MetricsAnalyzer) extractMetricValue(snapshot MetricsSnapshot, metric s
 		return snapshot.AgentMetrics.CompletionRate, nil
 	case "token_usage_percent":
 		return snapshot.BusinessMetrics.TokenUsagePercent, nil
+	case "validation_error_rate":
+		// Note: ValidationMetrics would need to be added to MetricsSnapshot
+		// For now, return 0 as placeholder
+		return 0, nil
+	case "schema_drift_score":
+		// Note: DriftMetrics would need to be added to MetricsSnapshot
+		// For now, return 0 as placeholder
+		return 0, nil
 	default:
 		return 0, fmt.Errorf("unknown metric: %s", metric)
 	}

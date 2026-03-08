@@ -45,6 +45,7 @@ type SourceConfig struct {
 	Options     map[string]string      `yaml:"options"`
 	Checkpoint  *CheckpointConfig      `yaml:"checkpoint,omitempty"`
 	Consistency *ConsistencyConfig     `yaml:"consistency,omitempty"`
+	Validation  *ValidationConfig      `yaml:"validation,omitempty"`
 }
 
 type ConsistencyConfig struct {
@@ -64,6 +65,24 @@ type CheckpointConfig struct {
 	CompactionEnabled bool   `yaml:"compaction_enabled"`
 	SizeThresholdMB   int64  `yaml:"size_threshold_mb"`
 	AdaptiveMode      bool   `yaml:"adaptive_mode"`
+}
+
+type ValidationConfig struct {
+	Enabled         bool                    `yaml:"enabled"`
+	ErrorThreshold  float64                 `yaml:"error_threshold"`
+	DriftThreshold  float64                 `yaml:"drift_threshold"`
+	StrictMode      bool                    `yaml:"strict_mode"`
+	CustomRules     map[string][]CustomRule `yaml:"custom_rules"`
+}
+
+type CustomRule struct {
+	Field    string    `yaml:"field"`
+	Type     string    `yaml:"type"`
+	Min      *float64  `yaml:"min,omitempty"`
+	Max      *float64  `yaml:"max,omitempty"`
+	Pattern  string    `yaml:"pattern,omitempty"`
+	Values   []string  `yaml:"values,omitempty"`
+	Required bool      `yaml:"required"`
 }
 
 type BackupConfig struct {
