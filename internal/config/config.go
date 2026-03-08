@@ -35,15 +35,25 @@ type StorageConfig struct {
 }
 
 type SourceConfig struct {
-	Type        string            `yaml:"type"`
-	Enabled     bool              `yaml:"enabled"`
-	Schedule    string            `yaml:"schedule"`
-	Concurrency int              `yaml:"concurrency"`
-	BatchSize   int              `yaml:"batch_size"`
-	Objects     []string          `yaml:"objects"`
-	Auth        map[string]string `yaml:"auth"`
-	Options     map[string]string `yaml:"options"`
-	Checkpoint  *CheckpointConfig `yaml:"checkpoint,omitempty"`
+	Type        string                 `yaml:"type"`
+	Enabled     bool                   `yaml:"enabled"`
+	Schedule    string                 `yaml:"schedule"`
+	Concurrency int                   `yaml:"concurrency"`
+	BatchSize   int                   `yaml:"batch_size"`
+	Objects     []string               `yaml:"objects"`
+	Auth        map[string]string      `yaml:"auth"`
+	Options     map[string]string      `yaml:"options"`
+	Checkpoint  *CheckpointConfig      `yaml:"checkpoint,omitempty"`
+	Consistency *ConsistencyConfig     `yaml:"consistency,omitempty"`
+}
+
+type ConsistencyConfig struct {
+	Enabled         bool                    `yaml:"enabled"`
+	Relationships   map[string][]string     `yaml:"relationships"`
+	Windows         map[string]string       `yaml:"staleness_windows"`
+	MaxStaleness    string                  `yaml:"max_staleness"`
+	RequiredObjects []string                `yaml:"required_objects"`
+	FailOnViolation bool                    `yaml:"fail_on_violation"`
 }
 
 type CheckpointConfig struct {

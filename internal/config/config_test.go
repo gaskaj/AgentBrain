@@ -105,6 +105,60 @@ sources:
 	assert.Equal(t, "fallback-bucket", cfg.Storage.Bucket)
 }
 
+func TestLoad_ConsistencyConfig(t *testing.T) {
+	yaml := `
+storage:
+  bucket: test-bucket
+  region: us-west-2
+
+sources:
+  salesforce:
+    type: salesforce
+    enabled: true
+    objects:
+      - Account
+      - Contact
+    consistency:
+      enabled: true
+      relationships:
+        Account:
+          - Contact
+          - Opportunity
+        Contact:
+          - Case
+      staleness_windows:
+        Account: "2h"
+        Contact: "1h"
+      max_staleness: "24h"
+      required_objects:
+        - Account
+        - Contact
+      fail_on_violation: true
+`
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	src := cfg.Sources["salesforce"]
+	require.NotNil(t, src)
+	require.NotNil(t, src.Consistency)
+
+	consistency := src.Consistency
+	assert.True(t, consistency.Enabled)
+	assert.Equal(t, 2, len(consistency.Relationships))
+	assert.Equal(t, []string{"Contact", "Opportunity"}, consistency.Relationships["Account"])
+	assert.Equal(t, []string{"Case"}, consistency.Relationships["Contact"])
+	assert.Equal(t, "2h", consistency.Windows["Account"])
+	assert.Equal(t, "1h", consistency.Windows["Contact"])
+	assert.Equal(t, "24h", consistency.MaxStaleness)
+	assert.Equal(t, []string{"Account", "Contact"}, consistency.RequiredObjects)
+	assert.True(t, consistency.FailOnViolation)
+}
+
 func TestLoad_ValidationErrors(t *testing.T) {
 	tests := []struct {
 		name string

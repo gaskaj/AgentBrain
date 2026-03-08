@@ -26,10 +26,12 @@ type ObjectState struct {
 
 // SyncState holds the overall state for a source.
 type SyncState struct {
-	Source     string                 `json:"source"`
-	Objects    map[string]ObjectState `json:"objects"`
-	LastRunAt  time.Time              `json:"lastRunAt"`
-	RunCount   int64                  `json:"runCount"`
+	Source                  string                    `json:"source"`
+	Objects                 map[string]ObjectState    `json:"objects"`
+	LastRunAt               time.Time                 `json:"lastRunAt"`
+	RunCount                int64                     `json:"runCount"`
+	LastConsistencyCheck    time.Time                 `json:"lastConsistencyCheck"`
+	ConsistencyViolations   []ConsistencyViolation    `json:"consistencyViolations"`
 }
 
 // StateStore persists and loads sync state from S3.
