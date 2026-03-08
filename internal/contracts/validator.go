@@ -1,7 +1,6 @@
 package contracts
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"regexp"

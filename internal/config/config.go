@@ -18,6 +18,7 @@ type Config struct {
 	Monitoring monitoring.MonitoringConfig     `yaml:"monitoring"`
 	Backup     *BackupConfig                    `yaml:"backup,omitempty"`
 	Profiler   *ProfilerConfig                  `yaml:"profiler,omitempty"`
+	Plugins    *PluginConfig                    `yaml:"plugins,omitempty"`
 }
 
 type AgentConfig struct {
@@ -106,6 +107,23 @@ type ProfilerConfig struct {
 	CPUProfileDuration    time.Duration `yaml:"cpu_profile_duration"`
 	MemoryProfileInterval time.Duration `yaml:"memory_profile_interval"`
 	GoroutineThreshold    int           `yaml:"goroutine_threshold"`
+}
+
+type PluginConfig struct {
+	Enabled     bool                    `yaml:"enabled"`
+	Directory   string                  `yaml:"directory"`
+	AutoReload  bool                    `yaml:"auto_reload"`
+	WatchPaths  []string                `yaml:"watch_paths"`
+	Security    *PluginSecurityConfig   `yaml:"security,omitempty"`
+}
+
+type PluginSecurityConfig struct {
+	MaxMemoryMB      int               `yaml:"max_memory_mb"`
+	MaxCPUPercent    float64           `yaml:"max_cpu_percent"`
+	NetworkAllowed   bool              `yaml:"network_allowed"`
+	AllowedHosts     []string          `yaml:"allowed_hosts"`
+	AllowedEnvVars   map[string]string `yaml:"allowed_env_vars"`
+	SandboxEnabled   bool              `yaml:"sandbox_enabled"`
 }
 
 func Load(path string) (*Config, error) {
@@ -221,6 +239,11 @@ func setDefaults(cfg *Config) {
 	if cfg.Profiler != nil {
 		setProfilerDefaults(cfg.Profiler)
 	}
+
+	// Set plugin defaults if plugin config is provided
+	if cfg.Plugins != nil {
+		setPluginDefaults(cfg.Plugins)
+	}
 }
 
 func setCheckpointDefaults(cp *CheckpointConfig) {
@@ -271,6 +294,28 @@ func setProfilerDefaults(pf *ProfilerConfig) {
 	}
 	if pf.GoroutineThreshold <= 0 {
 		pf.GoroutineThreshold = 1000
+	}
+}
+
+func setPluginDefaults(pg *PluginConfig) {
+	if pg.Directory == "" {
+		pg.Directory = "/etc/agentbrain/plugins"
+	}
+	if len(pg.WatchPaths) == 0 {
+		pg.WatchPaths = []string{pg.Directory}
+	}
+	
+	// Set security defaults if security config is provided
+	if pg.Security != nil {
+		if pg.Security.MaxMemoryMB <= 0 {
+			pg.Security.MaxMemoryMB = 512
+		}
+		if pg.Security.MaxCPUPercent <= 0 {
+			pg.Security.MaxCPUPercent = 25.0
+		}
+		if pg.Security.AllowedEnvVars == nil {
+			pg.Security.AllowedEnvVars = make(map[string]string)
+		}
 	}
 }
 
