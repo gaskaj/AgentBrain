@@ -20,6 +20,7 @@ type Config struct {
 	Profiler   *ProfilerConfig                  `yaml:"profiler,omitempty"`
 	Plugins    *PluginConfig                    `yaml:"plugins,omitempty"`
 	Retry      *RetryConfig                     `yaml:"retry,omitempty"`
+	Migration  *MigrationConfig                 `yaml:"migration,omitempty"`
 }
 
 type AgentConfig struct {
@@ -143,6 +144,15 @@ type RetryConfig struct {
 	DefaultPolicy     RetryPolicyConfig                    `yaml:"default_policy"`
 	CircuitBreakers   map[string]CircuitBreakerConfig      `yaml:"circuit_breakers"`
 	OperationPolicies map[string]RetryPolicyConfig         `yaml:"operation_policies"`
+}
+
+// MigrationConfig holds the migration system configuration.
+type MigrationConfig struct {
+	Enabled             bool          `yaml:"enabled"`
+	AutoMigrate         bool          `yaml:"auto_migrate"`
+	BackupBeforeMigrate bool          `yaml:"backup_before_migrate"`
+	ValidationMode      string        `yaml:"validation_mode"` // strict, warn, skip
+	MaxMigrationTime    time.Duration `yaml:"max_migration_time"`
 }
 
 // RetryPolicyConfig represents the configuration for a retry policy.
@@ -290,6 +300,11 @@ func setDefaults(cfg *Config) {
 	// Set retry defaults if retry config is provided
 	if cfg.Retry != nil {
 		setRetryDefaults(cfg.Retry)
+	}
+
+	// Set migration defaults if migration config is provided
+	if cfg.Migration != nil {
+		setMigrationDefaults(cfg.Migration)
 	}
 }
 
@@ -473,6 +488,24 @@ func setRetryDefaults(rt *RetryConfig) {
 			policy.BackoffStrategy = rt.DefaultPolicy.BackoffStrategy
 		}
 		rt.OperationPolicies[name] = policy
+	}
+}
+
+func setMigrationDefaults(mg *MigrationConfig) {
+	if mg.ValidationMode == "" {
+		mg.ValidationMode = "strict"
+	}
+	if mg.MaxMigrationTime <= 0 {
+		mg.MaxMigrationTime = 5 * time.Minute
+	}
+	// Enabled defaults to false for safety - should be explicitly enabled
+	// AutoMigrate defaults to true if enabled
+	if mg.Enabled && !mg.AutoMigrate {
+		mg.AutoMigrate = true
+	}
+	// BackupBeforeMigrate defaults to true for safety
+	if mg.Enabled && !mg.BackupBeforeMigrate {
+		mg.BackupBeforeMigrate = true
 	}
 }
 
