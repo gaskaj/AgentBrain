@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	
+	"github.com/agentbrain/agentbrain/internal/retry"
 )
 
 const (
@@ -22,9 +24,11 @@ const (
 
 // Client is a Salesforce HTTP client with OAuth, rate limiting, and retries.
 type Client struct {
-	httpClient *http.Client
-	auth       AuthConfig
-	logger     *slog.Logger
+	httpClient     *http.Client
+	auth           AuthConfig
+	logger         *slog.Logger
+	retryPolicy    *retry.RetryPolicy
+	circuitBreaker *retry.CircuitBreaker
 
 	mu          sync.RWMutex
 	accessToken string
@@ -36,11 +40,36 @@ func NewClient(auth AuthConfig, logger *slog.Logger) *Client {
 	if auth.LoginURL == "" {
 		auth.LoginURL = defaultLoginURL
 	}
-	return &Client{
+	
+	client := &Client{
 		httpClient: &http.Client{Timeout: 2 * time.Minute},
 		auth:       auth,
 		logger:     logger,
 	}
+	
+	// Initialize retry policies
+	client.initializeRetryPolicies()
+	
+	return client
+}
+
+// initializeRetryPolicies sets up retry policies and circuit breaker for Salesforce operations.
+func (c *Client) initializeRetryPolicies() {
+	// Create retry policy optimized for API operations with rate limiting
+	c.retryPolicy = retry.APIPolicy()
+	
+	// Create circuit breaker for Salesforce operations
+	c.circuitBreaker = retry.NewCircuitBreaker("salesforce_api", 5, 2*time.Minute)
+}
+
+// SetRetryPolicy allows customizing the retry policy.
+func (c *Client) SetRetryPolicy(policy *retry.RetryPolicy) {
+	c.retryPolicy = policy
+}
+
+// SetCircuitBreaker allows customizing the circuit breaker.
+func (c *Client) SetCircuitBreaker(cb *retry.CircuitBreaker) {
+	c.circuitBreaker = cb
 }
 
 // Authenticate performs the OAuth2 username-password flow.
@@ -124,22 +153,11 @@ func (c *Client) GetStream(ctx context.Context, path string) (io.ReadCloser, err
 }
 
 func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
-	c.mu.RLock()
-	base := c.instanceURL
-	token := c.accessToken
-	c.mu.RUnlock()
-
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			delay := retryBaseDelay * time.Duration(1<<(attempt-1))
-			c.logger.Debug("retrying request", "path", path, "attempt", attempt, "delay", delay)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
-			}
-		}
+	operation := func(ctx context.Context) ([]byte, error) {
+		c.mu.RLock()
+		base := c.instanceURL
+		token := c.accessToken
+		c.mu.RUnlock()
 
 		reqURL := base + path
 		req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
@@ -153,20 +171,17 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("request %s: %w", path, err)
-			continue
+			return nil, fmt.Errorf("request %s: %w", path, err)
 		}
 
 		respBody, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			lastErr = fmt.Errorf("read response %s: %w", path, err)
-			continue
+			return nil, fmt.Errorf("read response %s: %w", path, err)
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			lastErr = fmt.Errorf("request %s returned status %d: %s", path, resp.StatusCode, string(respBody))
-			continue
+			return nil, fmt.Errorf("request %s returned status %d: %s", path, resp.StatusCode, string(respBody))
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -176,7 +191,13 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 		return respBody, nil
 	}
 
-	return nil, fmt.Errorf("exhausted retries for %s: %w", path, lastErr)
+	// Execute with unified retry framework
+	if c.retryPolicy != nil && c.circuitBreaker != nil {
+		return retry.ExecuteWithRetryAndCircuitBreaker(ctx, c.retryPolicy, c.circuitBreaker, operation)
+	}
+
+	// Fallback to direct execution
+	return operation(ctx)
 }
 
 // BaseURL returns the API base path.

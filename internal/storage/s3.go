@@ -17,12 +17,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/agentbrain/agentbrain/internal/config"
+	"github.com/agentbrain/agentbrain/internal/retry"
 )
 
 type S3Client struct {
-	client *s3.Client
-	bucket string
-	prefix string
+	client            *s3.Client
+	bucket            string
+	prefix            string
+	retryExecutor     *RetryExecutor
+	circuitBreaker    *retry.CircuitBreaker
+}
+
+// RetryExecutor wraps retry policies and circuit breakers for S3 operations.
+type RetryExecutor struct {
+	uploadPolicy    *retry.RetryPolicy
+	downloadPolicy  *retry.RetryPolicy
+	circuitBreaker  *retry.CircuitBreaker
 }
 
 func NewS3Client(ctx context.Context, cfg config.StorageConfig) (*S3Client, error) {
@@ -71,11 +81,16 @@ func NewS3ClientWithCredentials(ctx context.Context, cfg config.StorageConfig, a
 
 	client := s3.NewFromConfig(awsCfg, s3Opts...)
 
-	return &S3Client{
+	s3Client := &S3Client{
 		client: client,
 		bucket: cfg.Bucket,
 		prefix: strings.TrimSuffix(cfg.Prefix, "/"),
-	}, nil
+	}
+
+	// Initialize retry executor with S3-optimized policies
+	s3Client.initializeRetryPolicies()
+
+	return s3Client, nil
 }
 
 func (c *S3Client) fullKey(key string) string {
@@ -85,60 +100,178 @@ func (c *S3Client) fullKey(key string) string {
 	return c.prefix + "/" + key
 }
 
-func (c *S3Client) Upload(ctx context.Context, key string, data []byte, contentType string) error {
-	input := &s3.PutObjectInput{
-		Bucket:      aws.String(c.bucket),
-		Key:         aws.String(c.fullKey(key)),
-		Body:        bytes.NewReader(data),
-		ContentType: aws.String(contentType),
+// initializeRetryPolicies sets up retry policies and circuit breaker for S3 operations.
+func (c *S3Client) initializeRetryPolicies() {
+	// Create circuit breaker for S3 operations
+	c.circuitBreaker = retry.NewCircuitBreaker("s3_operations", 5, 60*time.Second)
+
+	// Create retry executor with S3-optimized policies
+	uploadPolicy := retry.S3Policy()
+	uploadPolicy.MaxAttempts = 5
+	
+	downloadPolicy := retry.S3Policy()
+	downloadPolicy.MaxAttempts = 3
+
+	c.retryExecutor = &RetryExecutor{
+		uploadPolicy:   uploadPolicy,
+		downloadPolicy: downloadPolicy,
+		circuitBreaker: c.circuitBreaker,
+	}
+}
+
+// SetRetryConfig allows customizing retry configuration for S3 operations.
+func (c *S3Client) SetRetryConfig(retryConfig *config.RetryConfig) error {
+	if retryConfig == nil {
+		return nil
 	}
 
-	_, err := c.client.PutObject(ctx, input)
-	if err != nil {
-		return fmt.Errorf("upload s3://%s/%s: %w", c.bucket, key, err)
+	// Update upload policy if configured
+	if uploadPolicy, exists := retryConfig.OperationPolicies["s3_upload"]; exists {
+		policy, err := c.convertToPolicyConfig(uploadPolicy)
+		if err != nil {
+			return fmt.Errorf("invalid s3_upload policy: %w", err)
+		}
+		c.retryExecutor.uploadPolicy = policy
 	}
+
+	// Update download policy if configured
+	if downloadPolicy, exists := retryConfig.OperationPolicies["s3_download"]; exists {
+		policy, err := c.convertToPolicyConfig(downloadPolicy)
+		if err != nil {
+			return fmt.Errorf("invalid s3_download policy: %w", err)
+		}
+		c.retryExecutor.downloadPolicy = policy
+	}
+
+	// Update circuit breaker if configured
+	if cbConfig, exists := retryConfig.CircuitBreakers["s3_operations"]; exists && cbConfig.Enabled {
+		c.circuitBreaker = retry.NewCircuitBreaker("s3_operations", cbConfig.FailureThreshold, cbConfig.ResetTimeout)
+		c.retryExecutor.circuitBreaker = c.circuitBreaker
+	}
+
 	return nil
 }
 
+// convertToPolicyConfig converts config.RetryPolicyConfig to retry.RetryPolicy.
+func (c *S3Client) convertToPolicyConfig(config config.RetryPolicyConfig) (*retry.RetryPolicy, error) {
+	policy := &retry.RetryPolicy{
+		MaxAttempts: config.MaxAttempts,
+		BaseDelay:   config.BaseDelay,
+		MaxDelay:    config.MaxDelay,
+		Jitter:      config.Jitter,
+	}
+
+	// Set backoff function
+	switch config.BackoffStrategy {
+	case "", "exponential":
+		policy.BackoffFunc = retry.ExponentialBackoff
+	case "exponential_jitter":
+		policy.BackoffFunc = retry.ExponentialBackoffWithJitter
+	case "linear":
+		policy.BackoffFunc = retry.LinearBackoff
+	case "fixed":
+		policy.BackoffFunc = retry.FixedBackoff
+	default:
+		return nil, fmt.Errorf("unknown backoff strategy: %s", config.BackoffStrategy)
+	}
+
+	// Set retryable function for S3
+	policy.RetryableFunc = retry.S3RetryableFunc
+
+	return policy, nil
+}
+
+// GetCircuitBreakerMetrics returns metrics for the S3 circuit breaker.
+func (c *S3Client) GetCircuitBreakerMetrics() retry.CircuitBreakerMetrics {
+	if c.circuitBreaker == nil {
+		return retry.CircuitBreakerMetrics{}
+	}
+	return c.circuitBreaker.GetMetrics()
+}
+
+func (c *S3Client) Upload(ctx context.Context, key string, data []byte, contentType string) error {
+	operation := func(ctx context.Context) (struct{}, error) {
+		input := &s3.PutObjectInput{
+			Bucket:      aws.String(c.bucket),
+			Key:         aws.String(c.fullKey(key)),
+			Body:        bytes.NewReader(data),
+			ContentType: aws.String(contentType),
+		}
+
+		_, err := c.client.PutObject(ctx, input)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("upload s3://%s/%s: %w", c.bucket, key, err)
+		}
+		return struct{}{}, nil
+	}
+
+	if c.retryExecutor != nil {
+		_, err := retry.ExecuteWithRetryAndCircuitBreaker(ctx, c.retryExecutor.uploadPolicy, c.retryExecutor.circuitBreaker, operation)
+		return err
+	}
+
+	// Fallback to direct execution if no retry executor
+	_, err := operation(ctx)
+	return err
+}
+
 func (c *S3Client) Download(ctx context.Context, key string) ([]byte, error) {
-	input := &s3.GetObjectInput{
-		Bucket: aws.String(c.bucket),
-		Key:    aws.String(c.fullKey(key)),
+	operation := func(ctx context.Context) ([]byte, error) {
+		input := &s3.GetObjectInput{
+			Bucket: aws.String(c.bucket),
+			Key:    aws.String(c.fullKey(key)),
+		}
+
+		resp, err := c.client.GetObject(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("download s3://%s/%s: %w", c.bucket, key, err)
+		}
+		defer resp.Body.Close()
+
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read s3://%s/%s: %w", c.bucket, key, err)
+		}
+		return data, nil
 	}
 
-	resp, err := c.client.GetObject(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("download s3://%s/%s: %w", c.bucket, key, err)
+	if c.retryExecutor != nil {
+		return retry.ExecuteWithRetryAndCircuitBreaker(ctx, c.retryExecutor.downloadPolicy, c.retryExecutor.circuitBreaker, operation)
 	}
-	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read s3://%s/%s: %w", c.bucket, key, err)
-	}
-	return data, nil
+	// Fallback to direct execution if no retry executor
+	return operation(ctx)
 }
 
 func (c *S3Client) Exists(ctx context.Context, key string) (bool, error) {
-	input := &s3.HeadObjectInput{
-		Bucket: aws.String(c.bucket),
-		Key:    aws.String(c.fullKey(key)),
+	operation := func(ctx context.Context) (bool, error) {
+		input := &s3.HeadObjectInput{
+			Bucket: aws.String(c.bucket),
+			Key:    aws.String(c.fullKey(key)),
+		}
+
+		_, err := c.client.HeadObject(ctx, input)
+		if err != nil {
+			var nsk *types.NotFound
+			if ok := errors.As(err, &nsk); ok {
+				return false, nil
+			}
+			// Also check for NoSuchKey
+			var nf *types.NoSuchKey
+			if ok := errors.As(err, &nf); ok {
+				return false, nil
+			}
+			return false, fmt.Errorf("head s3://%s/%s: %w", c.bucket, key, err)
+		}
+		return true, nil
 	}
 
-	_, err := c.client.HeadObject(ctx, input)
-	if err != nil {
-		var nsk *types.NotFound
-		if ok := errors.As(err, &nsk); ok {
-			return false, nil
-		}
-		// Also check for NoSuchKey
-		var nf *types.NoSuchKey
-		if ok := errors.As(err, &nf); ok {
-			return false, nil
-		}
-		return false, fmt.Errorf("head s3://%s/%s: %w", c.bucket, key, err)
+	if c.retryExecutor != nil {
+		return retry.ExecuteWithRetryAndCircuitBreaker(ctx, c.retryExecutor.downloadPolicy, c.retryExecutor.circuitBreaker, operation)
 	}
-	return true, nil
+
+	// Fallback to direct execution if no retry executor
+	return operation(ctx)
 }
 
 func (c *S3Client) List(ctx context.Context, prefix string) ([]string, error) {

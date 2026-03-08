@@ -13,7 +13,16 @@ import (
 	"github.com/agentbrain/agentbrain/internal/storage"
 	"github.com/agentbrain/agentbrain/internal/storage/delta"
 	"github.com/agentbrain/agentbrain/internal/validation"
+	"github.com/agentbrain/agentbrain/internal/retry"
 )
+
+// SyncRetryExecutor manages retry policies for different sync operations.
+type SyncRetryExecutor struct {
+	connectPolicy    *retry.RetryPolicy
+	discoverPolicy   *retry.RetryPolicy
+	extractPolicy    *retry.RetryPolicy
+	circuitBreakers  map[string]*retry.CircuitBreaker
+}
 
 // Engine orchestrates the sync lifecycle: discover -> plan -> extract -> write -> commit.
 type Engine struct {
@@ -34,6 +43,7 @@ type Engine struct {
 	metricsCollector    *validation.MetricsCollector
 	recoveryManager     *RecoveryManager
 	errorAggregator     *ErrorAggregator
+	retryExecutor       *SyncRetryExecutor
 }
 
 // NewEngine creates a new sync engine.
@@ -50,7 +60,7 @@ func NewEngine(
 	stateStore := NewS3RecoveryStateStore(s3, s3.GetBucket(), fmt.Sprintf("sync/%s", source), logger)
 	recoveryManager := NewRecoveryManager(recoveryConfig, stateStore, logger)
 	
-	return &Engine{
+	engine := &Engine{
 		connector:       conn,
 		s3:              s3,
 		stateStore:      NewStateStore(s3, logger),
@@ -63,6 +73,11 @@ func NewEngine(
 		recoveryManager: recoveryManager,
 		errorAggregator: NewErrorAggregator(),
 	}
+	
+	// Initialize retry executor
+	engine.initializeRetryExecutor()
+	
+	return engine
 }
 
 // NewEngineWithConsistency creates a new sync engine with consistency validation.
@@ -94,7 +109,7 @@ func NewEngineWithConsistency(
 	stateStore := NewS3RecoveryStateStore(s3, s3.GetBucket(), fmt.Sprintf("sync/%s", source), logger)
 	recoveryManager := NewRecoveryManager(recoveryConfig, stateStore, logger)
 
-	return &Engine{
+	engine := &Engine{
 		connector:           conn,
 		s3:                  s3,
 		stateStore:          NewStateStore(s3, logger),
@@ -109,6 +124,11 @@ func NewEngineWithConsistency(
 		recoveryManager:     recoveryManager,
 		errorAggregator:     NewErrorAggregator(),
 	}
+	
+	// Initialize retry executor
+	engine.initializeRetryExecutor()
+	
+	return engine
 }
 
 // NewEngineWithValidation creates a new sync engine with data validation.
@@ -194,7 +214,7 @@ func NewEngineWithValidation(
 	stateStore := NewS3RecoveryStateStore(s3, s3.GetBucket(), fmt.Sprintf("sync/%s", source), logger)
 	recoveryManager := NewRecoveryManager(recoveryConfig, stateStore, logger)
 
-	return &Engine{
+	engine := &Engine{
 		connector:           conn,
 		s3:                  s3,
 		stateStore:          NewStateStore(s3, logger),
@@ -212,6 +232,11 @@ func NewEngineWithValidation(
 		recoveryManager:     recoveryManager,
 		errorAggregator:     NewErrorAggregator(),
 	}
+	
+	// Initialize retry executor
+	engine.initializeRetryExecutor()
+	
+	return engine
 }
 
 // Run executes a full sync cycle.
@@ -592,4 +617,104 @@ func (e *Engine) syncObject(ctx context.Context, state *SyncState, plan *ObjectP
 	}
 
 	return nil
+}
+
+// initializeRetryExecutor sets up retry policies for sync operations.
+func (e *Engine) initializeRetryExecutor() {
+	e.retryExecutor = &SyncRetryExecutor{
+		connectPolicy:   retry.NetworkPolicy(),
+		discoverPolicy:  retry.APIPolicy(),
+		extractPolicy:   retry.DefaultRetryPolicy(),
+		circuitBreakers: make(map[string]*retry.CircuitBreaker),
+	}
+	
+	// Create circuit breakers for different operations
+	e.retryExecutor.circuitBreakers["connect"] = retry.NewCircuitBreaker(
+		fmt.Sprintf("sync_connect_%s", e.source), 3, 5*time.Minute)
+	e.retryExecutor.circuitBreakers["discover"] = retry.NewCircuitBreaker(
+		fmt.Sprintf("sync_discover_%s", e.source), 5, 2*time.Minute)
+	e.retryExecutor.circuitBreakers["extract"] = retry.NewCircuitBreaker(
+		fmt.Sprintf("sync_extract_%s", e.source), 10, time.Minute)
+}
+
+// SetRetryConfig allows customizing retry configuration for sync operations.
+func (e *Engine) SetRetryConfig(retryConfig *config.RetryConfig) error {
+	if retryConfig == nil || e.retryExecutor == nil {
+		return nil
+	}
+
+	// Update connect policy if configured
+	if connectPolicy, exists := retryConfig.OperationPolicies["sync_connect"]; exists {
+		policy, err := e.convertToRetryPolicy(connectPolicy)
+		if err != nil {
+			return fmt.Errorf("invalid sync_connect policy: %w", err)
+		}
+		e.retryExecutor.connectPolicy = policy
+	}
+
+	// Update discover policy if configured
+	if discoverPolicy, exists := retryConfig.OperationPolicies["sync_discover"]; exists {
+		policy, err := e.convertToRetryPolicy(discoverPolicy)
+		if err != nil {
+			return fmt.Errorf("invalid sync_discover policy: %w", err)
+		}
+		e.retryExecutor.discoverPolicy = policy
+	}
+
+	// Update extract policy if configured
+	if extractPolicy, exists := retryConfig.OperationPolicies["sync_extract"]; exists {
+		policy, err := e.convertToRetryPolicy(extractPolicy)
+		if err != nil {
+			return fmt.Errorf("invalid sync_extract policy: %w", err)
+		}
+		e.retryExecutor.extractPolicy = policy
+	}
+
+	return nil
+}
+
+// convertToRetryPolicy converts config.RetryPolicyConfig to retry.RetryPolicy.
+func (e *Engine) convertToRetryPolicy(config config.RetryPolicyConfig) (*retry.RetryPolicy, error) {
+	policy := &retry.RetryPolicy{
+		MaxAttempts: config.MaxAttempts,
+		BaseDelay:   config.BaseDelay,
+		MaxDelay:    config.MaxDelay,
+		Jitter:      config.Jitter,
+	}
+
+	// Set backoff function
+	switch config.BackoffStrategy {
+	case "", "exponential":
+		policy.BackoffFunc = retry.ExponentialBackoff
+	case "exponential_jitter":
+		policy.BackoffFunc = retry.ExponentialBackoffWithJitter
+	case "linear":
+		policy.BackoffFunc = retry.LinearBackoff
+	case "fixed":
+		policy.BackoffFunc = retry.FixedBackoff
+	case "api_rate_limit":
+		policy.BackoffFunc = retry.APIRateLimitBackoff
+	case "network":
+		policy.BackoffFunc = retry.NetworkBackoff
+	default:
+		return nil, fmt.Errorf("unknown backoff strategy: %s", config.BackoffStrategy)
+	}
+
+	// Set retryable function
+	policy.RetryableFunc = retry.DefaultRetryableFunc
+
+	return policy, nil
+}
+
+// GetRetryMetrics returns retry metrics for the sync engine.
+func (e *Engine) GetRetryMetrics() map[string]retry.CircuitBreakerMetrics {
+	if e.retryExecutor == nil {
+		return nil
+	}
+	
+	metrics := make(map[string]retry.CircuitBreakerMetrics)
+	for name, cb := range e.retryExecutor.circuitBreakers {
+		metrics[name] = cb.GetMetrics()
+	}
+	return metrics
 }
