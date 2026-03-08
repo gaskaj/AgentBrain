@@ -34,6 +34,9 @@ type SyncState struct {
 	ConsistencyViolations   []ConsistencyViolation    `json:"consistencyViolations"`
 }
 
+// CurrentVersion returns the current schema version for SyncState.
+const CurrentSyncStateVersion = 1
+
 // StateStore persists and loads sync state from S3.
 type StateStore struct {
 	s3     *storage.S3Client
