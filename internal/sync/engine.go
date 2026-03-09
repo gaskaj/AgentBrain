@@ -10,10 +10,14 @@ import (
 
 	"github.com/agentbrain/agentbrain/internal/config"
 	"github.com/agentbrain/agentbrain/internal/connector"
+	"github.com/agentbrain/agentbrain/internal/observability"
 	"github.com/agentbrain/agentbrain/internal/storage"
 	"github.com/agentbrain/agentbrain/internal/storage/delta"
 	"github.com/agentbrain/agentbrain/internal/validation"
 	"github.com/agentbrain/agentbrain/internal/retry"
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // SyncRetryExecutor manages retry policies for different sync operations.
@@ -44,6 +48,11 @@ type Engine struct {
 	recoveryManager     *RecoveryManager
 	errorAggregator     *ErrorAggregator
 	retryExecutor       *SyncRetryExecutor
+	
+	// Observability components
+	tracingManager      *observability.TracingManager
+	metricsManager      *observability.MetricsManager
+	contextualLogger    *observability.ContextualLogger
 }
 
 // NewEngine creates a new sync engine.
@@ -239,11 +248,29 @@ func NewEngineWithValidation(
 	return engine
 }
 
+// SetObservabilityManagers sets the observability managers for the engine.
+func (e *Engine) SetObservabilityManagers(tracingManager *observability.TracingManager, metricsManager *observability.MetricsManager) {
+	e.tracingManager = tracingManager
+	e.metricsManager = metricsManager
+}
+
 // Run executes a full sync cycle.
 func (e *Engine) Run(ctx context.Context) error {
-	e.logger.Info("starting sync run", "source", e.source)
 	startTime := time.Now()
-	correlationID := fmt.Sprintf("sync_%s_%d", e.source, startTime.Unix())
+	
+	// Generate correlation ID for this sync run
+	correlationID := uuid.New().String()
+	
+	// Create contextual logger with correlation ID
+	e.contextualLogger = observability.NewContextualLogger(e.logger, correlationID).
+		WithSyncContext("source", e.source).
+		WithSyncContext("sync_id", correlationID).
+		WithSyncContext("start_time", startTime)
+	
+	e.contextualLogger.Info("starting sync run")
+	
+	// Add correlation ID to context
+	ctx = observability.WithCorrelationID(ctx, correlationID)
 	
 	// Create validation report if validation is enabled
 	var validationReport *validation.ValidationReport
@@ -252,16 +279,33 @@ func (e *Engine) Run(ctx context.Context) error {
 		validationReport = e.metricsCollector.CreateReport(e.source, syncID)
 	}
 
-	// 1. Connect with error handling
-	connectOp := func(ctx context.Context) (*Result, error) {
-		if err := e.connector.Connect(ctx); err != nil {
-			return nil, NewSyncError(SyncPhaseConnect, "", err, true).WithCorrelationID(correlationID)
+	// 1. Connect with error handling and tracing
+	var err error
+	if e.tracingManager != nil {
+		err = e.tracingManager.TraceSyncOperation(ctx, "connect", e.source, "", func(ctx context.Context, span trace.Span) error {
+			connectOp := func(ctx context.Context) (*Result, error) {
+				if err := e.connector.Connect(ctx); err != nil {
+					return nil, NewSyncError(SyncPhaseConnect, "", err, true).WithCorrelationID(correlationID)
+				}
+				return &Result{}, nil
+			}
+			
+			_, err := e.recoveryManager.ExecuteWithRetry(ctx, e.source, "connection", SyncPhaseConnect, connectOp)
+			return err
+		})
+	} else {
+		connectOp := func(ctx context.Context) (*Result, error) {
+			if err := e.connector.Connect(ctx); err != nil {
+				return nil, NewSyncError(SyncPhaseConnect, "", err, true).WithCorrelationID(correlationID)
+			}
+			return &Result{}, nil
 		}
-		return &Result{}, nil
+		
+		_, err = e.recoveryManager.ExecuteWithRetry(ctx, e.source, "connection", SyncPhaseConnect, connectOp)
 	}
 	
-	_, err := e.recoveryManager.ExecuteWithRetry(ctx, e.source, "connection", SyncPhaseConnect, connectOp)
 	if err != nil {
+		e.contextualLogger.Error("failed to connect", "error", err.Error())
 		return fmt.Errorf("connect to %s: %w", e.source, err)
 	}
 	defer e.connector.Close()
@@ -273,19 +317,40 @@ func (e *Engine) Run(ctx context.Context) error {
 		return fmt.Errorf("load state: %w", syncErr)
 	}
 
-	// 3. Discover metadata with error handling
+	// 3. Discover metadata with error handling and tracing
 	var allObjects []connector.ObjectMetadata
-	discoverOp := func(ctx context.Context) (*Result, error) {
-		objects, err := e.connector.DiscoverMetadata(ctx)
-		if err != nil {
-			return nil, NewSyncError(SyncPhaseDiscover, "", err, true).WithCorrelationID(correlationID)
+	if e.tracingManager != nil {
+		err = e.tracingManager.TraceSyncOperation(ctx, "discover", e.source, "", func(ctx context.Context, span trace.Span) error {
+			discoverOp := func(ctx context.Context) (*Result, error) {
+				objects, err := e.connector.DiscoverMetadata(ctx)
+				if err != nil {
+					return nil, NewSyncError(SyncPhaseDiscover, "", err, true).WithCorrelationID(correlationID)
+				}
+				allObjects = objects
+				return &Result{RecordsProcessed: int64(len(objects))}, nil
+			}
+			
+			result, err := e.recoveryManager.ExecuteWithRetry(ctx, e.source, "discovery", SyncPhaseDiscover, discoverOp)
+			if err == nil && result != nil {
+				span.SetAttributes(attribute.Int64("objects_discovered", result.RecordsProcessed))
+			}
+			return err
+		})
+	} else {
+		discoverOp := func(ctx context.Context) (*Result, error) {
+			objects, err := e.connector.DiscoverMetadata(ctx)
+			if err != nil {
+				return nil, NewSyncError(SyncPhaseDiscover, "", err, true).WithCorrelationID(correlationID)
+			}
+			allObjects = objects
+			return &Result{RecordsProcessed: int64(len(objects))}, nil
 		}
-		allObjects = objects
-		return &Result{RecordsProcessed: int64(len(objects))}, nil
+		
+		_, err = e.recoveryManager.ExecuteWithRetry(ctx, e.source, "discovery", SyncPhaseDiscover, discoverOp)
 	}
 	
-	_, err = e.recoveryManager.ExecuteWithRetry(ctx, e.source, "discovery", SyncPhaseDiscover, discoverOp)
 	if err != nil {
+		e.contextualLogger.Error("failed to discover metadata", "error", err.Error())
 		return fmt.Errorf("discover metadata: %w", err)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -120,4 +121,159 @@ func parseLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// ContextualLogger provides structured logging with correlation IDs and sync context.
+type ContextualLogger struct {
+	logger        *slog.Logger
+	correlationID string
+	syncContext   map[string]interface{}
+	mu            sync.RWMutex
+}
+
+// NewContextualLogger creates a new contextual logger.
+func NewContextualLogger(logger *slog.Logger, correlationID string) *ContextualLogger {
+	return &ContextualLogger{
+		logger:        logger,
+		correlationID: correlationID,
+		syncContext:   make(map[string]interface{}),
+	}
+}
+
+// WithCorrelationID creates a new logger with the given correlation ID.
+func (cl *ContextualLogger) WithCorrelationID(correlationID string) *ContextualLogger {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	
+	return &ContextualLogger{
+		logger:        cl.logger,
+		correlationID: correlationID,
+		syncContext:   cl.syncContext,
+	}
+}
+
+// WithSyncContext adds sync context to the logger.
+func (cl *ContextualLogger) WithSyncContext(key string, value interface{}) *ContextualLogger {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	
+	newContext := make(map[string]interface{})
+	for k, v := range cl.syncContext {
+		newContext[k] = v
+	}
+	newContext[key] = value
+	
+	return &ContextualLogger{
+		logger:        cl.logger,
+		correlationID: cl.correlationID,
+		syncContext:   newContext,
+	}
+}
+
+// buildArgs creates the base arguments with correlation ID and sync context.
+func (cl *ContextualLogger) buildArgs(args ...interface{}) []interface{} {
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
+	
+	baseArgs := make([]interface{}, 0, len(args)+len(cl.syncContext)*2+2)
+	baseArgs = append(baseArgs, "correlation_id", cl.correlationID)
+	
+	for key, value := range cl.syncContext {
+		baseArgs = append(baseArgs, key, value)
+	}
+	
+	baseArgs = append(baseArgs, args...)
+	return baseArgs
+}
+
+// Debug logs a debug message with context.
+func (cl *ContextualLogger) Debug(msg string, args ...interface{}) {
+	cl.logger.Debug(msg, cl.buildArgs(args...)...)
+}
+
+// Info logs an info message with context.
+func (cl *ContextualLogger) Info(msg string, args ...interface{}) {
+	cl.logger.Info(msg, cl.buildArgs(args...)...)
+}
+
+// Warn logs a warning message with context.
+func (cl *ContextualLogger) Warn(msg string, args ...interface{}) {
+	cl.logger.Warn(msg, cl.buildArgs(args...)...)
+}
+
+// Error logs an error message with context.
+func (cl *ContextualLogger) Error(msg string, args ...interface{}) {
+	cl.logger.Error(msg, cl.buildArgs(args...)...)
+}
+
+// LogSyncPhase logs a sync phase event with structured context.
+func (cl *ContextualLogger) LogSyncPhase(phase, source, object string, startTime time.Time, err error) {
+	duration := time.Since(startTime)
+	
+	args := []interface{}{
+		"sync_phase", phase,
+		"source", source,
+		"object", object,
+		"duration_ms", duration.Milliseconds(),
+	}
+	
+	if err != nil {
+		args = append(args, "error", err.Error())
+		cl.Error("sync phase failed", args...)
+	} else {
+		cl.Info("sync phase completed", args...)
+	}
+}
+
+// LogConnectorOperation logs a connector operation with structured context.
+func (cl *ContextualLogger) LogConnectorOperation(connector, operation, method string, startTime time.Time, err error) {
+	duration := time.Since(startTime)
+	
+	args := []interface{}{
+		"connector", connector,
+		"operation", operation,
+		"method", method,
+		"duration_ms", duration.Milliseconds(),
+	}
+	
+	if err != nil {
+		args = append(args, "error", err.Error())
+		cl.Error("connector operation failed", args...)
+	} else {
+		cl.Info("connector operation completed", args...)
+	}
+}
+
+// LogStorageOperation logs a storage operation with structured context.
+func (cl *ContextualLogger) LogStorageOperation(operation, storageType string, startTime time.Time, dataSize int64, err error) {
+	duration := time.Since(startTime)
+	
+	args := []interface{}{
+		"storage_operation", operation,
+		"storage_type", storageType,
+		"duration_ms", duration.Milliseconds(),
+		"data_size_bytes", dataSize,
+	}
+	
+	if err != nil {
+		args = append(args, "error", err.Error())
+		cl.Error("storage operation failed", args...)
+	} else {
+		cl.Info("storage operation completed", args...)
+	}
+}
+
+// LogBusinessMetrics logs business metrics with structured context.
+func (cl *ContextualLogger) LogBusinessMetrics(source string, recordsProcessed int64, dataVolumeBytes int64, schemaChanges int64) {
+	cl.Info("business metrics recorded",
+		"source", source,
+		"records_processed", recordsProcessed,
+		"data_volume_bytes", dataVolumeBytes,
+		"schema_changes", schemaChanges,
+	)
+}
+
+// GetLogger returns the underlying slog.Logger.
+func (cl *ContextualLogger) GetLogger() *slog.Logger {
+	return cl.logger
 }

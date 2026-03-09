@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -275,6 +276,236 @@ func (mc *MetricsCollector) Reset() {
 		OperationMetrics:      make(map[string]RetryOperationMetrics),
 		CircuitBreakerMetrics: make(map[string]CircuitBreakerStatus),
 	}
+}
+
+// MetricsManager extends the existing metrics collector with business metrics.
+type MetricsManager struct {
+	collector         *MetricsCollector
+	syncMetrics       *SyncMetrics
+	connectorMetrics  *ConnectorMetrics
+	storageMetrics    *StorageMetrics
+	businessMetrics   *BusinessMetrics
+	httpMetrics       *HTTPMetrics
+	mu                sync.RWMutex
+}
+
+// SyncMetrics contains sync operation metrics.
+type SyncMetrics struct {
+	TotalSyncs        int64                    `json:"total_syncs"`
+	SuccessfulSyncs   int64                    `json:"successful_syncs"`
+	FailedSyncs       int64                    `json:"failed_syncs"`
+	SyncDurations     map[string]time.Duration `json:"sync_durations"`
+	RecordsProcessed  map[string]int64         `json:"records_processed"`
+	LastSyncTimes     map[string]time.Time     `json:"last_sync_times"`
+	SyncSuccessRates  map[string]float64       `json:"sync_success_rates"`
+}
+
+// ConnectorMetrics contains connector operation metrics.
+type ConnectorMetrics struct {
+	APICallCounts     map[string]int64         `json:"api_call_counts"`
+	APICallDurations  map[string]time.Duration `json:"api_call_durations"`
+	APICallFailures   map[string]int64         `json:"api_call_failures"`
+	AuthFailures      map[string]int64         `json:"auth_failures"`
+	RateLimitHits     map[string]int64         `json:"rate_limit_hits"`
+	LastAPICallTimes  map[string]time.Time     `json:"last_api_call_times"`
+}
+
+// StorageMetrics contains storage operation metrics.
+type StorageMetrics struct {
+	S3Operations      map[string]int64         `json:"s3_operations"`
+	S3Latencies       map[string]time.Duration `json:"s3_latencies"`
+	S3Failures        map[string]int64         `json:"s3_failures"`
+	ParquetWrites     int64                    `json:"parquet_writes"`
+	ParquetWriteSize  int64                    `json:"parquet_write_size_bytes"`
+	DeltaCommits      int64                    `json:"delta_commits"`
+	DeltaCommitLatency time.Duration           `json:"delta_commit_latency"`
+}
+
+// BusinessMetrics contains business-level metrics.
+type BusinessMetrics struct {
+	DataVolumeBytes   map[string]int64  `json:"data_volume_bytes"`
+	SchemaChanges     map[string]int64  `json:"schema_changes"`
+	DataFreshness     map[string]time.Duration `json:"data_freshness"`
+	ConnectorHealth   map[string]string `json:"connector_health"`
+	SyncFrequency     map[string]float64 `json:"sync_frequency_per_hour"`
+}
+
+// HTTPMetrics contains HTTP request metrics.
+type HTTPMetrics struct {
+	RequestCounts    map[string]int64         `json:"request_counts"`
+	RequestDurations map[string]time.Duration `json:"request_durations"`
+	StatusCodeCounts map[int]int64            `json:"status_code_counts"`
+	ResponseSizes    map[string]int64         `json:"response_sizes"`
+}
+
+// NewMetricsManager creates a new comprehensive metrics manager.
+func NewMetricsManager() *MetricsManager {
+	return &MetricsManager{
+		collector: NewMetricsCollector(),
+		syncMetrics: &SyncMetrics{
+			SyncDurations:    make(map[string]time.Duration),
+			RecordsProcessed: make(map[string]int64),
+			LastSyncTimes:    make(map[string]time.Time),
+			SyncSuccessRates: make(map[string]float64),
+		},
+		connectorMetrics: &ConnectorMetrics{
+			APICallCounts:    make(map[string]int64),
+			APICallDurations: make(map[string]time.Duration),
+			APICallFailures:  make(map[string]int64),
+			AuthFailures:     make(map[string]int64),
+			RateLimitHits:    make(map[string]int64),
+			LastAPICallTimes: make(map[string]time.Time),
+		},
+		storageMetrics: &StorageMetrics{
+			S3Operations: make(map[string]int64),
+			S3Latencies:  make(map[string]time.Duration),
+			S3Failures:   make(map[string]int64),
+		},
+		businessMetrics: &BusinessMetrics{
+			DataVolumeBytes: make(map[string]int64),
+			SchemaChanges:   make(map[string]int64),
+			DataFreshness:   make(map[string]time.Duration),
+			ConnectorHealth: make(map[string]string),
+			SyncFrequency:   make(map[string]float64),
+		},
+		httpMetrics: &HTTPMetrics{
+			RequestCounts:    make(map[string]int64),
+			RequestDurations: make(map[string]time.Duration),
+			StatusCodeCounts: make(map[int]int64),
+			ResponseSizes:    make(map[string]int64),
+		},
+	}
+}
+
+// GetCollector returns the underlying metrics collector.
+func (mm *MetricsManager) GetCollector() *MetricsCollector {
+	return mm.collector
+}
+
+// RecordSyncOperation records metrics for a sync operation.
+func (mm *MetricsManager) RecordSyncOperation(source string, success bool, duration time.Duration) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	
+	mm.syncMetrics.TotalSyncs++
+	mm.syncMetrics.SyncDurations[source] = duration
+	mm.syncMetrics.LastSyncTimes[source] = time.Now()
+	
+	if success {
+		mm.syncMetrics.SuccessfulSyncs++
+	} else {
+		mm.syncMetrics.FailedSyncs++
+	}
+	
+	// Update success rate
+	total := mm.syncMetrics.SuccessfulSyncs + mm.syncMetrics.FailedSyncs
+	if total > 0 {
+		mm.syncMetrics.SyncSuccessRates[source] = float64(mm.syncMetrics.SuccessfulSyncs) / float64(total)
+	}
+}
+
+// RecordConnectorOperation records metrics for a connector operation.
+func (mm *MetricsManager) RecordConnectorOperation(connector, operation string, success bool, duration time.Duration) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	
+	key := fmt.Sprintf("%s.%s", connector, operation)
+	mm.connectorMetrics.APICallCounts[key]++
+	mm.connectorMetrics.APICallDurations[key] = duration
+	mm.connectorMetrics.LastAPICallTimes[key] = time.Now()
+	
+	if !success {
+		mm.connectorMetrics.APICallFailures[key]++
+	}
+}
+
+// RecordStorageOperation records metrics for a storage operation.
+func (mm *MetricsManager) RecordStorageOperation(operation string, success bool, duration time.Duration) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	
+	mm.storageMetrics.S3Operations[operation]++
+	mm.storageMetrics.S3Latencies[operation] = duration
+	
+	if !success {
+		mm.storageMetrics.S3Failures[operation]++
+	}
+}
+
+// RecordHTTPRequest records metrics for an HTTP request.
+func (mm *MetricsManager) RecordHTTPRequest(method, path string, statusCode int, duration time.Duration) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	
+	key := fmt.Sprintf("%s %s", method, path)
+	mm.httpMetrics.RequestCounts[key]++
+	mm.httpMetrics.RequestDurations[key] = duration
+	mm.httpMetrics.StatusCodeCounts[statusCode]++
+}
+
+// RecordDataVolume records data volume metrics.
+func (mm *MetricsManager) RecordDataVolume(source string, bytes int64) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	
+	mm.businessMetrics.DataVolumeBytes[source] += bytes
+}
+
+// RecordSchemaChange records a schema change event.
+func (mm *MetricsManager) RecordSchemaChange(source string) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	
+	mm.businessMetrics.SchemaChanges[source]++
+}
+
+// UpdateConnectorHealth updates connector health status.
+func (mm *MetricsManager) UpdateConnectorHealth(connector, health string) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	
+	mm.businessMetrics.ConnectorHealth[connector] = health
+}
+
+// GetSyncMetrics returns current sync metrics.
+func (mm *MetricsManager) GetSyncMetrics() SyncMetrics {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+	
+	// Return a copy to avoid race conditions
+	return *mm.syncMetrics
+}
+
+// GetConnectorMetrics returns current connector metrics.
+func (mm *MetricsManager) GetConnectorMetrics() ConnectorMetrics {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+	
+	return *mm.connectorMetrics
+}
+
+// GetStorageMetrics returns current storage metrics.
+func (mm *MetricsManager) GetStorageMetrics() StorageMetrics {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+	
+	return *mm.storageMetrics
+}
+
+// GetBusinessMetrics returns current business metrics.
+func (mm *MetricsManager) GetBusinessMetrics() BusinessMetrics {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+	
+	return *mm.businessMetrics
+}
+
+// GetHTTPMetrics returns current HTTP metrics.
+func (mm *MetricsManager) GetHTTPMetrics() HTTPMetrics {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+	
+	return *mm.httpMetrics
 }
 
 // EnableRetryMetrics enables retry metrics collection.

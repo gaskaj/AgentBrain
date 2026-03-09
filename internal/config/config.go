@@ -21,7 +21,8 @@ type Config struct {
 	Plugins    *PluginConfig                    `yaml:"plugins,omitempty"`
 	Retry      *RetryConfig                     `yaml:"retry,omitempty"`
 	Migration  *MigrationConfig                 `yaml:"migration,omitempty"`
-	Security   *SecurityConfig                  `yaml:"security,omitempty"`
+	Security      *SecurityConfig                  `yaml:"security,omitempty"`
+	Observability *ObservabilityConfig             `yaml:"observability,omitempty"`
 }
 
 type AgentConfig struct {
@@ -235,6 +236,40 @@ type SecurityRule struct {
 	Metadata    map[string]string `yaml:"metadata,omitempty"`
 }
 
+// ObservabilityConfig holds observability framework configuration
+type ObservabilityConfig struct {
+	Tracing TracingConfig `yaml:"tracing"`
+	Metrics MetricsConfig `yaml:"metrics"`
+	Logging LoggingConfig `yaml:"logging"`
+}
+
+// TracingConfig configures distributed tracing
+type TracingConfig struct {
+	Enabled        bool    `yaml:"enabled"`
+	Exporter       string  `yaml:"exporter"`         // jaeger, zipkin, otlp
+	Endpoint       string  `yaml:"endpoint"`
+	SampleRate     float64 `yaml:"sample_rate"`
+	ServiceName    string  `yaml:"service_name"`
+	ServiceVersion string  `yaml:"service_version"`
+}
+
+// MetricsConfig configures metrics collection and export
+type MetricsConfig struct {
+	Enabled            bool          `yaml:"enabled"`
+	Exporter           string        `yaml:"exporter"`           // prometheus, datadog, newrelic
+	Endpoint           string        `yaml:"endpoint"`
+	CollectionInterval time.Duration `yaml:"collection_interval"`
+	BusinessMetrics    bool          `yaml:"business_metrics"`
+	HTTPMetrics        bool          `yaml:"http_metrics"`
+}
+
+// LoggingConfig configures structured logging enhancements
+type LoggingConfig struct {
+	CorrelationIDs    bool `yaml:"correlation_ids"`
+	StructuredContext bool `yaml:"structured_context"`
+	TraceIntegration  bool `yaml:"trace_integration"`
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -372,6 +407,11 @@ func setDefaults(cfg *Config) {
 	// Set security defaults if security config is provided
 	if cfg.Security != nil {
 		setSecurityDefaults(cfg.Security)
+	}
+
+	// Set observability defaults if observability config is provided
+	if cfg.Observability != nil {
+		setObservabilityDefaults(cfg.Observability)
 	}
 }
 
@@ -774,6 +814,49 @@ func validateSecurityConfig(sc *SecurityConfig) error {
 	}
 
 	return nil
+}
+
+func setObservabilityDefaults(obs *ObservabilityConfig) {
+	// Set tracing defaults
+	if obs.Tracing.ServiceName == "" {
+		obs.Tracing.ServiceName = "agentbrain"
+	}
+	if obs.Tracing.ServiceVersion == "" {
+		obs.Tracing.ServiceVersion = "unknown"
+	}
+	if obs.Tracing.SampleRate == 0 {
+		obs.Tracing.SampleRate = 0.1
+	}
+	if obs.Tracing.Exporter == "" {
+		obs.Tracing.Exporter = "jaeger"
+	}
+	if obs.Tracing.Endpoint == "" {
+		switch obs.Tracing.Exporter {
+		case "jaeger":
+			obs.Tracing.Endpoint = "http://localhost:14268/api/traces"
+		case "zipkin":
+			obs.Tracing.Endpoint = "http://localhost:9411/api/v2/spans"
+		case "otlp":
+			obs.Tracing.Endpoint = "http://localhost:4318/v1/traces"
+		}
+	}
+	
+	// Set metrics defaults
+	if obs.Metrics.Exporter == "" {
+		obs.Metrics.Exporter = "prometheus"
+	}
+	if obs.Metrics.Endpoint == "" && obs.Metrics.Exporter == "prometheus" {
+		obs.Metrics.Endpoint = ":9090"
+	}
+	if obs.Metrics.CollectionInterval == 0 {
+		obs.Metrics.CollectionInterval = 30 * time.Second
+	}
+	
+	// Enable business and HTTP metrics by default
+	if !obs.Metrics.BusinessMetrics && !obs.Metrics.HTTPMetrics {
+		obs.Metrics.BusinessMetrics = true
+		obs.Metrics.HTTPMetrics = true
+	}
 }
 
 
