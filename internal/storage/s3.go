@@ -18,6 +18,7 @@ import (
 
 	"github.com/agentbrain/agentbrain/internal/config"
 	"github.com/agentbrain/agentbrain/internal/retry"
+	"github.com/agentbrain/agentbrain/internal/resource"
 )
 
 type S3Client struct {
@@ -26,6 +27,7 @@ type S3Client struct {
 	prefix            string
 	retryExecutor     *RetryExecutor
 	circuitBreaker    *retry.CircuitBreaker
+	resourceManager   *resource.Manager
 }
 
 // RetryExecutor wraps retry policies and circuit breakers for S3 operations.
@@ -91,6 +93,11 @@ func NewS3ClientWithCredentials(ctx context.Context, cfg config.StorageConfig, a
 	s3Client.initializeRetryPolicies()
 
 	return s3Client, nil
+}
+
+// SetResourceManager sets the resource manager for the S3 client
+func (c *S3Client) SetResourceManager(rm *resource.Manager) {
+	c.resourceManager = rm
 }
 
 func (c *S3Client) fullKey(key string) string {

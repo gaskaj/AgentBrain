@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/agentbrain/agentbrain/internal/resource"
 )
 
 // HealthStatus represents the overall health state of a component
@@ -82,16 +84,17 @@ type HealthRule interface {
 
 // HealthMonitor orchestrates health monitoring and alerting
 type HealthMonitor struct {
-	config       MonitoringConfig
-	rules        []HealthRule
-	alerting     *AlertManager
-	logger       *slog.Logger
-	mu           sync.RWMutex
-	lastCheck    time.Time
-	isRunning    bool
-	stopCh       chan struct{}
-	doneCh       chan struct{}
-	errorTracker *ErrorPatternTracker
+	config          MonitoringConfig
+	rules           []HealthRule
+	alerting        *AlertManager
+	logger          *slog.Logger
+	mu              sync.RWMutex
+	lastCheck       time.Time
+	isRunning       bool
+	stopCh          chan struct{}
+	doneCh          chan struct{}
+	errorTracker    *ErrorPatternTracker
+	resourceManager *resource.Manager
 }
 
 // ErrorPatternTracker tracks and analyzes error patterns
@@ -223,6 +226,13 @@ func NewHealthMonitor(config MonitoringConfig, logger *slog.Logger) (*HealthMoni
 	}
 
 	return hm, nil
+}
+
+// SetResourceManager sets the resource manager for resource health monitoring
+func (hm *HealthMonitor) SetResourceManager(rm *resource.Manager) {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+	hm.resourceManager = rm
 }
 
 // Start begins health monitoring in the background
@@ -398,8 +408,36 @@ func (hm *HealthMonitor) performHealthCheck(ctx context.Context) error {
 }
 
 func (hm *HealthMonitor) collectMetrics(ctx context.Context) (*MetricsSnapshot, error) {
-	// TODO: Integrate with actual metrics collection
-	// For now, return mock data to demonstrate the interface
+	var systemMetrics SystemMetrics
+	
+	// Collect resource metrics if resource manager is available
+	if hm.resourceManager != nil {
+		if usage, err := hm.resourceManager.GetCurrentUsage(ctx); err == nil {
+			systemMetrics.MemoryUsagePercent = usage.MemoryPercent
+			systemMetrics.DiskUsagePercent = usage.DiskPercent
+			// CPU usage would need OS-specific implementation
+			systemMetrics.CPUUsagePercent = 23.4 // Mock for now
+		} else {
+			hm.logger.Warn("failed to collect resource usage", "error", err)
+			// Fall back to mock data
+			systemMetrics = SystemMetrics{
+				DiskUsagePercent:    45.2,
+				MemoryUsagePercent:  67.8,
+				CPUUsagePercent:     23.4,
+			}
+		}
+	} else {
+		// Default mock data when no resource manager
+		systemMetrics = SystemMetrics{
+			DiskUsagePercent:    45.2,
+			MemoryUsagePercent:  67.8,
+			CPUUsagePercent:     23.4,
+		}
+	}
+	
+	systemMetrics.APIResponseTime = 150 * time.Millisecond
+	systemMetrics.CircuitBreakerTrips = 2
+	
 	return &MetricsSnapshot{
 		Timestamp: time.Now(),
 		AgentMetrics: AgentMetrics{
@@ -410,13 +448,7 @@ func (hm *HealthMonitor) collectMetrics(ctx context.Context) (*MetricsSnapshot, 
 			ErrorCount:        12,
 			SuccessCount:      245,
 		},
-		SystemMetrics: SystemMetrics{
-			DiskUsagePercent:    45.2,
-			MemoryUsagePercent:  67.8,
-			CPUUsagePercent:     23.4,
-			APIResponseTime:     150 * time.Millisecond,
-			CircuitBreakerTrips: 2,
-		},
+		SystemMetrics:   systemMetrics,
 		BusinessMetrics: BusinessMetrics{
 			WorkflowSuccessRate: 0.89,
 			PRCreationRate:      0.78,

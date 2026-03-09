@@ -10,15 +10,17 @@ import (
 	pq "github.com/parquet-go/parquet-go"
 	"github.com/parquet-go/parquet-go/compress/snappy"
 
+	"github.com/agentbrain/agentbrain/internal/resource"
 	"github.com/agentbrain/agentbrain/internal/schema"
 )
 
 // ParquetWriter writes dynamic record batches to Parquet files on S3.
 type ParquetWriter struct {
-	s3     *S3Client
-	layout Layout
-	source string
-	logger *slog.Logger
+	s3              *S3Client
+	layout          Layout
+	source          string
+	logger          *slog.Logger
+	resourceManager *resource.Manager
 }
 
 // NewParquetWriter creates a new ParquetWriter.
@@ -28,6 +30,11 @@ func NewParquetWriter(s3 *S3Client, source string, logger *slog.Logger) *Parquet
 		source: source,
 		logger: logger,
 	}
+}
+
+// SetResourceManager sets the resource manager for the Parquet writer
+func (w *ParquetWriter) SetResourceManager(rm *resource.Manager) {
+	w.resourceManager = rm
 }
 
 // WrittenFile contains info about a successfully written Parquet file.
@@ -45,6 +52,27 @@ func (w *ParquetWriter) WriteRecords(ctx context.Context, objectName string, s *
 		return nil, nil
 	}
 
+	// Apply resource-aware batch size adjustment
+	effectiveRecords := records
+	if w.resourceManager != nil {
+		if usage, err := w.resourceManager.GetCurrentUsage(ctx); err == nil {
+			if usage.MemoryPercent > 80 {
+				// Reduce batch size when memory usage is high
+				maxRecords := len(records) / 2
+				if maxRecords < 100 {
+					maxRecords = 100 // Minimum batch size
+				}
+				if maxRecords < len(records) {
+					effectiveRecords = records[:maxRecords]
+					w.logger.Warn("reduced parquet batch size due to memory pressure",
+						"original", len(records),
+						"effective", len(effectiveRecords),
+						"memory_percent", usage.MemoryPercent)
+				}
+			}
+		}
+	}
+
 	pqSchema := schema.ToParquetSchema(s)
 
 	filename := fmt.Sprintf("part-00000-%s.snappy.parquet", uuid.New().String())
@@ -57,8 +85,8 @@ func (w *ParquetWriter) WriteRecords(ctx context.Context, objectName string, s *
 	)
 
 	// Convert records to rows
-	rows := make([]map[string]any, len(records))
-	for i, rec := range records {
+	rows := make([]map[string]any, len(effectiveRecords))
+	for i, rec := range effectiveRecords {
 		row := make(map[string]any, len(rec))
 		for k, v := range rec {
 			row[k] = v
@@ -82,7 +110,7 @@ func (w *ParquetWriter) WriteRecords(ctx context.Context, objectName string, s *
 	w.logger.Info("wrote parquet file",
 		"object", objectName,
 		"key", key,
-		"rows", len(records),
+		"rows", len(effectiveRecords),
 		"bytes", len(data),
 	)
 
@@ -90,6 +118,6 @@ func (w *ParquetWriter) WriteRecords(ctx context.Context, objectName string, s *
 		Key:      key,
 		Filename: filename,
 		Size:     int64(len(data)),
-		NumRows:  int64(len(records)),
+		NumRows:  int64(len(effectiveRecords)),
 	}, nil
 }

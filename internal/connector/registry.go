@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/agentbrain/agentbrain/internal/config"
+	"github.com/agentbrain/agentbrain/internal/resource"
 )
 
 // Factory creates a Connector from a source config.
@@ -16,6 +17,8 @@ type Registry struct {
 	mu             sync.RWMutex
 	factories      map[string]Factory
 	pluginManager  PluginManager // Interface to plugin manager
+	resourceManager *resource.Manager
+	httpClientPool resource.HTTPClientPool
 }
 
 // PluginManager interface for plugin integration
@@ -35,6 +38,24 @@ func (r *Registry) SetPluginManager(pm PluginManager) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pluginManager = pm
+}
+
+// SetResourceManager sets the resource manager for connection pooling
+func (r *Registry) SetResourceManager(rm *resource.Manager) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resourceManager = rm
+	
+	if rm != nil {
+		// Get HTTP client pool from resource manager
+		if pool, err := rm.GetPool("http_clients"); err == nil {
+			// Use type assertion to check for the specific type we registered
+			if httpPool, ok := pool.(*resource.HTTPClientPoolImpl); ok {
+				r.httpClientPool = httpPool
+			}
+		}
+	}
+	return nil
 }
 
 // Register adds a connector factory to the registry.

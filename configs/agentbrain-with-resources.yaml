@@ -1,0 +1,207 @@
+agent:
+  log_level: info
+  log_format: json
+  health_addr: ":8080"
+  schedule: "@every 1h"
+  timeout: 30m
+
+storage:
+  bucket: agentbrain-data
+  region: us-west-2
+  prefix: data
+
+# Resource management configuration
+resources:
+  enabled: true
+  limits:
+    max_memory_mb: 2048
+    max_goroutines: 1000
+    max_file_handles: 500
+    max_connections: 100
+    max_disk_usage_mb: 10240
+  pools:
+    http_clients:
+      max_size: 20
+      initial_size: 5
+      idle_timeout: 5m
+      cleanup_interval: 1m
+    parquet_writers:
+      max_size: 10
+      idle_timeout: 2m
+      cleanup_interval: 30s
+  degradation:
+    memory_threshold: 0.8
+    goroutine_threshold: 0.9
+    disk_threshold: 0.85
+    connection_threshold: 0.8
+    strategies:
+      - type: reduce_concurrency
+        trigger_threshold: 0.8
+        enabled: true
+      - type: skip_validation
+        trigger_threshold: 0.9
+        enabled: true
+      - type: emergency_stop
+        trigger_threshold: 0.95
+        enabled: true
+
+sources:
+  salesforce:
+    type: salesforce
+    enabled: true
+    schedule: "@every 30m"
+    concurrency: 8
+    batch_size: 10000
+    objects:
+      - Account
+      - Contact
+      - Opportunity
+    auth:
+      client_id: "${SF_CLIENT_ID}"
+      client_secret: "${SF_CLIENT_SECRET}"
+      username: "${SF_USERNAME}"
+      password: "${SF_PASSWORD}"
+      security_token: "${SF_SECURITY_TOKEN}"
+      login_url: https://login.salesforce.com
+    checkpoint:
+      frequency: 1000
+      retention_days: 30
+      validation_enabled: true
+      adaptive_mode: true
+    consistency:
+      enabled: true
+      relationships:
+        Account: ["Contact", "Opportunity"]
+      staleness_windows:
+        Account: "5m"
+        Contact: "10m"
+        Opportunity: "15m"
+      max_staleness: "1h"
+      required_objects: ["Account"]
+      fail_on_violation: false
+    validation:
+      enabled: true
+      error_threshold: 0.1
+      drift_threshold: 0.05
+      strict_mode: false
+    error_handling:
+      max_retries: 3
+      base_delay: 2s
+      max_delay: 60s
+      circuit_breaker_threshold: 5
+      circuit_breaker_timeout: 5m
+      partial_recovery: true
+      skip_failed_objects: true
+
+monitoring:
+  enabled: true
+  check_interval: 5m
+  alert_cooldown: 30m
+  rules:
+    agent_failure_rate:
+      enabled: true
+      threshold: 0.10
+      window: 1h
+      severity: warning
+    workflow_completion:
+      enabled: true
+      min_success_rate: 0.80
+      window: 6h
+      severity: critical
+    disk_usage:
+      enabled: true
+      warning_threshold: 80.0
+      critical_threshold: 90.0
+      severity: warning
+    memory_usage:
+      enabled: true
+      warning_threshold: 80.0
+      critical_threshold: 90.0
+      severity: warning
+    api_response_time:
+      enabled: true
+      warning_threshold: 5s
+      critical_threshold: 10s
+      severity: warning
+  notifications:
+    slack:
+      enabled: false
+      webhook_url: "${SLACK_WEBHOOK_URL:-}"
+      channel: "#alerts"
+    email:
+      enabled: false
+      smtp_host: smtp.example.com
+      smtp_port: 587
+      username: "${SMTP_USERNAME:-}"
+      password: "${SMTP_PASSWORD:-}"
+      from: agentbrain@company.com
+      recipients:
+        - admin@company.com
+
+# Enhanced retry configuration with resource awareness
+retry:
+  default_policy:
+    max_attempts: 3
+    base_delay: 1s
+    max_delay: 30s
+    backoff_strategy: exponential_jitter
+    jitter: true
+  circuit_breakers:
+    s3_operations:
+      failure_threshold: 5
+      reset_timeout: 60s
+      enabled: true
+    connector_auth:
+      failure_threshold: 3
+      reset_timeout: 300s
+      enabled: true
+    api_operations:
+      failure_threshold: 10
+      reset_timeout: 120s
+      enabled: true
+  operation_policies:
+    s3_upload:
+      max_attempts: 5
+      base_delay: 2s
+      max_delay: 120s
+      backoff_strategy: exponential
+      jitter: true
+    s3_download:
+      max_attempts: 5
+      base_delay: 1s
+      max_delay: 60s
+      backoff_strategy: exponential
+      jitter: true
+    connector_auth:
+      max_attempts: 3
+      base_delay: 2s
+      max_delay: 30s
+      backoff_strategy: fixed
+      jitter: false
+    api_request:
+      max_attempts: 4
+      base_delay: 1s
+      max_delay: 30s
+      backoff_strategy: api_rate_limit
+      jitter: true
+
+# Optional backup configuration
+backup:
+  enabled: false
+  destination_bucket: agentbrain-backup
+  destination_region: us-east-1
+  schedule: "@daily"
+  retention_days: 30
+  cross_region: true
+  validation_mode: checksum
+  concurrent_uploads: 4
+  chunk_size_mb: 64
+
+# Optional profiling for performance analysis
+profiler:
+  enabled: false
+  sample_rate: 0.1
+  output_dir: "./profiles"
+  cpu_profile_duration: 30s
+  memory_profile_interval: 5m
+  goroutine_threshold: 1000

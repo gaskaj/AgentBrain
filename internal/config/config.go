@@ -21,6 +21,7 @@ type Config struct {
 	Plugins    *PluginConfig                    `yaml:"plugins,omitempty"`
 	Retry      *RetryConfig                     `yaml:"retry,omitempty"`
 	Migration  *MigrationConfig                 `yaml:"migration,omitempty"`
+	Resources  *ResourceConfig                  `yaml:"resources,omitempty"`
 }
 
 type AgentConfig struct {
@@ -153,6 +154,55 @@ type MigrationConfig struct {
 	BackupBeforeMigrate bool          `yaml:"backup_before_migrate"`
 	ValidationMode      string        `yaml:"validation_mode"` // strict, warn, skip
 	MaxMigrationTime    time.Duration `yaml:"max_migration_time"`
+}
+
+// ResourceConfig holds resource management configuration
+type ResourceConfig struct {
+	Enabled     bool                    `yaml:"enabled"`
+	Limits      ResourceLimitsConfig    `yaml:"limits"`
+	Pools       ResourcePoolsConfig     `yaml:"pools"`
+	Degradation DegradationConfig       `yaml:"degradation"`
+}
+
+// ResourceLimitsConfig defines system resource limits
+type ResourceLimitsConfig struct {
+	MaxMemoryMB     int64 `yaml:"max_memory_mb"`
+	MaxGoroutines   int   `yaml:"max_goroutines"`
+	MaxFileHandles  int   `yaml:"max_file_handles"`
+	MaxConnections  int   `yaml:"max_connections"`
+	MaxDiskUsageMB  int64 `yaml:"max_disk_usage_mb"`
+}
+
+// ResourcePoolsConfig defines configuration for resource pools
+type ResourcePoolsConfig struct {
+	HTTPClients     PoolConfig `yaml:"http_clients"`
+	ParquetWriters  PoolConfig `yaml:"parquet_writers"`
+}
+
+// PoolConfig defines configuration for a specific resource pool
+type PoolConfig struct {
+	MaxSize             int           `yaml:"max_size"`
+	InitialSize         int           `yaml:"initial_size"`
+	IdleTimeout         time.Duration `yaml:"idle_timeout"`
+	MaxLifetime         time.Duration `yaml:"max_lifetime"`
+	CleanupInterval     time.Duration `yaml:"cleanup_interval"`
+	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
+}
+
+// DegradationConfig defines graceful degradation configuration
+type DegradationConfig struct {
+	MemoryThreshold     float64                `yaml:"memory_threshold"`
+	GoroutineThreshold  float64                `yaml:"goroutine_threshold"`
+	DiskThreshold       float64                `yaml:"disk_threshold"`
+	ConnectionThreshold float64                `yaml:"connection_threshold"`
+	Strategies          []DegradationStrategy  `yaml:"strategies"`
+}
+
+// DegradationStrategy defines a specific degradation strategy
+type DegradationStrategy struct {
+	Type             string  `yaml:"type"`
+	TriggerThreshold float64 `yaml:"trigger_threshold"`
+	Enabled          bool    `yaml:"enabled"`
 }
 
 // RetryPolicyConfig represents the configuration for a retry policy.
@@ -305,6 +355,11 @@ func setDefaults(cfg *Config) {
 	// Set migration defaults if migration config is provided
 	if cfg.Migration != nil {
 		setMigrationDefaults(cfg.Migration)
+	}
+
+	// Set resource defaults if resource config is provided
+	if cfg.Resources != nil {
+		setResourceDefaults(cfg.Resources)
 	}
 }
 
@@ -506,6 +561,82 @@ func setMigrationDefaults(mg *MigrationConfig) {
 	// BackupBeforeMigrate defaults to true for safety
 	if mg.Enabled && !mg.BackupBeforeMigrate {
 		mg.BackupBeforeMigrate = true
+	}
+}
+
+func setResourceDefaults(rc *ResourceConfig) {
+	// Set resource limits defaults
+	if rc.Limits.MaxMemoryMB <= 0 {
+		rc.Limits.MaxMemoryMB = 2048 // 2GB default
+	}
+	if rc.Limits.MaxGoroutines <= 0 {
+		rc.Limits.MaxGoroutines = 1000
+	}
+	if rc.Limits.MaxFileHandles <= 0 {
+		rc.Limits.MaxFileHandles = 500
+	}
+	if rc.Limits.MaxConnections <= 0 {
+		rc.Limits.MaxConnections = 100
+	}
+	if rc.Limits.MaxDiskUsageMB <= 0 {
+		rc.Limits.MaxDiskUsageMB = 10240 // 10GB default
+	}
+
+	// Set HTTP client pool defaults
+	if rc.Pools.HTTPClients.MaxSize <= 0 {
+		rc.Pools.HTTPClients.MaxSize = 20
+	}
+	if rc.Pools.HTTPClients.IdleTimeout <= 0 {
+		rc.Pools.HTTPClients.IdleTimeout = 5 * time.Minute
+	}
+	if rc.Pools.HTTPClients.CleanupInterval <= 0 {
+		rc.Pools.HTTPClients.CleanupInterval = 1 * time.Minute
+	}
+
+	// Set Parquet writer pool defaults
+	if rc.Pools.ParquetWriters.MaxSize <= 0 {
+		rc.Pools.ParquetWriters.MaxSize = 10
+	}
+	if rc.Pools.ParquetWriters.IdleTimeout <= 0 {
+		rc.Pools.ParquetWriters.IdleTimeout = 2 * time.Minute
+	}
+	if rc.Pools.ParquetWriters.CleanupInterval <= 0 {
+		rc.Pools.ParquetWriters.CleanupInterval = 30 * time.Second
+	}
+
+	// Set degradation defaults
+	if rc.Degradation.MemoryThreshold <= 0 {
+		rc.Degradation.MemoryThreshold = 0.8 // 80%
+	}
+	if rc.Degradation.GoroutineThreshold <= 0 {
+		rc.Degradation.GoroutineThreshold = 0.9 // 90%
+	}
+	if rc.Degradation.DiskThreshold <= 0 {
+		rc.Degradation.DiskThreshold = 0.85 // 85%
+	}
+	if rc.Degradation.ConnectionThreshold <= 0 {
+		rc.Degradation.ConnectionThreshold = 0.8 // 80%
+	}
+
+	// Set default degradation strategies if none configured
+	if len(rc.Degradation.Strategies) == 0 {
+		rc.Degradation.Strategies = []DegradationStrategy{
+			{
+				Type:             "reduce_concurrency",
+				TriggerThreshold: 0.8,
+				Enabled:          true,
+			},
+			{
+				Type:             "skip_validation",
+				TriggerThreshold: 0.9,
+				Enabled:          true,
+			},
+			{
+				Type:             "emergency_stop",
+				TriggerThreshold: 0.95,
+				Enabled:          true,
+			},
+		}
 	}
 }
 

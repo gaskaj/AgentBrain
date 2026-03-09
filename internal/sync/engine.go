@@ -10,6 +10,7 @@ import (
 
 	"github.com/agentbrain/agentbrain/internal/config"
 	"github.com/agentbrain/agentbrain/internal/connector"
+	"github.com/agentbrain/agentbrain/internal/resource"
 	"github.com/agentbrain/agentbrain/internal/storage"
 	"github.com/agentbrain/agentbrain/internal/storage/delta"
 	"github.com/agentbrain/agentbrain/internal/validation"
@@ -44,6 +45,8 @@ type Engine struct {
 	recoveryManager     *RecoveryManager
 	errorAggregator     *ErrorAggregator
 	retryExecutor       *SyncRetryExecutor
+	resourceManager     *resource.Manager
+	resourceConfig      *config.ResourceConfig
 }
 
 // NewEngine creates a new sync engine.
@@ -78,6 +81,16 @@ func NewEngine(
 	engine.initializeRetryExecutor()
 	
 	return engine
+}
+
+// SetResourceManager sets the resource manager for the sync engine
+func (e *Engine) SetResourceManager(rm *resource.Manager, config *config.ResourceConfig) {
+	e.resourceManager = rm
+	e.resourceConfig = config
+	
+	if rm != nil && config != nil && config.Enabled {
+		e.logger.Info("resource management enabled for sync engine", "source", e.source)
+	}
 }
 
 // NewEngineWithConsistency creates a new sync engine with consistency validation.
@@ -319,8 +332,36 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	e.logger.Info("sync plan ready", "total_objects", len(plans))
 
-	// 5. Execute plans concurrently with error handling
-	sem := make(chan struct{}, e.concurrency)
+	// 5. Execute plans concurrently with error handling and resource management
+	// Apply resource-aware concurrency adjustment
+	effectiveConcurrency := e.concurrency
+	if e.resourceManager != nil && e.resourceConfig != nil && e.resourceConfig.Enabled {
+		usage, err := e.resourceManager.GetCurrentUsage(ctx)
+		if err != nil {
+			e.logger.Warn("failed to get resource usage, using default concurrency", "error", err)
+		} else if shouldDegrade, resourceTypes, err := e.resourceManager.ShouldDegrade(ctx); err != nil {
+			e.logger.Warn("failed to check degradation status", "error", err)
+		} else if shouldDegrade {
+			// Reduce concurrency based on resource pressure
+			reductionFactor := 0.5
+			for _, rt := range resourceTypes {
+				if rt == resource.ResourceTypeMemory && usage.MemoryPercent > 90 {
+					reductionFactor = 0.3 // More aggressive reduction for critical memory
+				}
+			}
+			effectiveConcurrency = int(float64(e.concurrency) * reductionFactor)
+			if effectiveConcurrency < 1 {
+				effectiveConcurrency = 1
+			}
+			e.logger.Info("reduced concurrency due to resource pressure",
+				"original", e.concurrency,
+				"effective", effectiveConcurrency,
+				"memory_percent", usage.MemoryPercent,
+				"affected_resources", resourceTypes)
+		}
+	}
+
+	sem := make(chan struct{}, effectiveConcurrency)
 	var mu sync.Mutex
 	var objectValidationResults = make(map[string][]validation.BatchValidationResult)
 
@@ -332,6 +373,22 @@ func (e *Engine) Run(ctx context.Context) error {
 
 			sem <- struct{}{}
 			defer func() { <-sem }()
+
+			// Check resource availability before starting object sync
+			if e.resourceManager != nil && e.resourceConfig != nil && e.resourceConfig.Enabled {
+				requirements := resource.ResourceRequirements{
+					Memory:      50,  // Estimated 50MB per object sync
+					Goroutines:  1,   // One goroutine per object
+					Connections: 2,   // Connection to source system and S3
+				}
+				if err := e.resourceManager.CheckResourceAvailability(ctx, requirements); err != nil {
+					e.logger.Warn("resource check failed, skipping object", 
+						"object", p.ObjectName, 
+						"error", err)
+					e.errorAggregator.Add(fmt.Errorf("resource check failed for %s: %w", p.ObjectName, err))
+					return
+				}
+			}
 
 			// Execute object sync with recovery
 			syncObjectOp := func(ctx context.Context) (*Result, error) {
