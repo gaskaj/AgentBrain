@@ -228,6 +228,81 @@ The backup system provides comprehensive data protection for Delta Lake tables. 
 
 For detailed backup configuration and usage, see [Backup and Disaster Recovery Guide](backup-recovery.md).
 
+### Security Configuration
+
+AgentBrain includes a comprehensive security framework for vulnerability scanning, static analysis, and runtime monitoring:
+
+```yaml
+security:
+  enabled: true
+  static_analysis:
+    enabled: true
+    fail_on_high: true
+    skip_directories: ["vendor", "node_modules", ".git"]
+    exclude_rules: ["G104"]  # Skip specific gosec rules
+    custom_rules:
+      - id: "CUSTOM001"
+        name: "Hardcoded API Keys"
+        description: "Detect hardcoded API keys in configuration"
+        pattern: 'api_key\s*=\s*["\'][^"\']{20,}["\']'
+        severity: "critical"
+        cwe: "CWE-798"
+        fix: "Use environment variables or secure vaults for API keys"
+        tags: ["credentials", "hardcoded"]
+  
+  dependency_audit:
+    enabled: true
+    fail_on_high: true
+    check_interval: "24h"
+    max_cvss_score: 7.0
+    ignore_packages: ["example.com/test-package"]
+    notify_channels: ["security-alerts"]
+  
+  runtime_monitoring:
+    enabled: true
+    auth_failure_threshold: 5
+    network_anomaly_detection: true
+    file_access_monitoring: true
+    memory_anomaly_detection: true
+    process_monitoring: true
+    network_connection_tracking: true
+  
+  encryption:
+    enforce_tls: true
+    min_tls_version: "1.2"
+    credential_encryption: true
+    data_at_rest_encryption: true
+    transit_encryption: true
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Enable or disable the security framework |
+| `static_analysis.enabled` | bool | `false` | Enable static code security analysis |
+| `static_analysis.fail_on_high` | bool | `false` | Fail builds on high/critical severity issues |
+| `static_analysis.skip_directories` | []string | `[]` | Directories to exclude from scanning |
+| `static_analysis.exclude_rules` | []string | `[]` | Specific security rules to skip |
+| `static_analysis.custom_rules` | []Rule | `[]` | Organization-specific security patterns |
+| `dependency_audit.enabled` | bool | `false` | Enable dependency vulnerability scanning |
+| `dependency_audit.fail_on_high` | bool | `false` | Fail on high-severity vulnerabilities |
+| `dependency_audit.check_interval` | duration | `24h` | How often to check for new vulnerabilities |
+| `dependency_audit.max_cvss_score` | float | `10.0` | Maximum acceptable CVSS score |
+| `dependency_audit.ignore_packages` | []string | `[]` | Packages to exclude from scanning |
+| `dependency_audit.notify_channels` | []string | `[]` | Alert channels for vulnerabilities |
+| `runtime_monitoring.enabled` | bool | `false` | Enable runtime security monitoring |
+| `runtime_monitoring.auth_failure_threshold` | int | `5` | Failed authentication attempts before alert |
+| `runtime_monitoring.network_anomaly_detection` | bool | `false` | Monitor for suspicious network activity |
+| `runtime_monitoring.file_access_monitoring` | bool | `false` | Monitor file system access patterns |
+| `runtime_monitoring.memory_anomaly_detection` | bool | `false` | Monitor memory usage anomalies |
+| `runtime_monitoring.process_monitoring` | bool | `false` | Monitor process and goroutine behavior |
+| `encryption.enforce_tls` | bool | `false` | Require TLS for all connections |
+| `encryption.min_tls_version` | string | `1.2` | Minimum acceptable TLS version |
+| `encryption.credential_encryption` | bool | `false` | Encrypt stored credentials |
+| `encryption.data_at_rest_encryption` | bool | `false` | Encrypt data storage |
+| `encryption.transit_encryption` | bool | `false` | Encrypt data in transit |
+
+For detailed security configuration, see [Security Documentation](security.md) and [Vulnerability Management Guide](vulnerability-management.md).
+
 ### Salesforce Auth Keys
 
 | Key | Description |
