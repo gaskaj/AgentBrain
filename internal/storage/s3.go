@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -17,7 +18,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/agentbrain/agentbrain/internal/config"
+	"github.com/agentbrain/agentbrain/internal/observability"
 	"github.com/agentbrain/agentbrain/internal/retry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type S3Client struct {
@@ -26,6 +30,9 @@ type S3Client struct {
 	prefix            string
 	retryExecutor     *RetryExecutor
 	circuitBreaker    *retry.CircuitBreaker
+	tracingManager    *observability.TracingManager
+	metricsManager    *observability.MetricsManager
+	logger            *slog.Logger
 }
 
 // RetryExecutor wraps retry policies and circuit breakers for S3 operations.
@@ -54,11 +61,17 @@ func NewS3Client(ctx context.Context, cfg config.StorageConfig) (*S3Client, erro
 
 	client := s3.NewFromConfig(awsCfg, s3Opts...)
 
-	return &S3Client{
+	s3Client := &S3Client{
 		client: client,
 		bucket: cfg.Bucket,
 		prefix: strings.TrimSuffix(cfg.Prefix, "/"),
-	}, nil
+		logger: slog.Default(),
+	}
+
+	// Initialize retry executor with S3-optimized policies
+	s3Client.initializeRetryPolicies()
+
+	return s3Client, nil
 }
 
 // NewS3ClientWithCredentials creates an S3 client with explicit credentials (useful for testing).
@@ -85,6 +98,7 @@ func NewS3ClientWithCredentials(ctx context.Context, cfg config.StorageConfig, a
 		client: client,
 		bucket: cfg.Bucket,
 		prefix: strings.TrimSuffix(cfg.Prefix, "/"),
+		logger: slog.Default(),
 	}
 
 	// Initialize retry executor with S3-optimized policies
@@ -189,7 +203,20 @@ func (c *S3Client) GetCircuitBreakerMetrics() retry.CircuitBreakerMetrics {
 	return c.circuitBreaker.GetMetrics()
 }
 
+// SetObservabilityManagers sets the observability managers for S3 operations.
+func (c *S3Client) SetObservabilityManagers(tracingManager *observability.TracingManager, metricsManager *observability.MetricsManager) {
+	c.tracingManager = tracingManager
+	c.metricsManager = metricsManager
+}
+
+// SetLogger sets the logger for S3 operations.
+func (c *S3Client) SetLogger(logger *slog.Logger) {
+	c.logger = logger
+}
+
 func (c *S3Client) Upload(ctx context.Context, key string, data []byte, contentType string) error {
+	startTime := time.Now()
+	
 	operation := func(ctx context.Context) (struct{}, error) {
 		input := &s3.PutObjectInput{
 			Bucket:      aws.String(c.bucket),
@@ -205,13 +232,63 @@ func (c *S3Client) Upload(ctx context.Context, key string, data []byte, contentT
 		return struct{}{}, nil
 	}
 
-	if c.retryExecutor != nil {
-		_, err := retry.ExecuteWithRetryAndCircuitBreaker(ctx, c.retryExecutor.uploadPolicy, c.retryExecutor.circuitBreaker, operation)
-		return err
-	}
+	var err error
+	if c.tracingManager != nil {
+		err = c.tracingManager.TraceStorageOperation(ctx, "upload", "s3", func(ctx context.Context, span trace.Span) error {
+			span.SetAttributes(
+				attribute.String("s3.bucket", c.bucket),
+				attribute.String("s3.key", key),
+				attribute.Int("s3.content_length", len(data)),
+				attribute.String("s3.content_type", contentType),
+			)
+			
+			if c.retryExecutor != nil {
+				_, err := retry.ExecuteWithRetryAndCircuitBreaker(ctx, c.retryExecutor.uploadPolicy, c.retryExecutor.circuitBreaker, operation)
+				return err
+			}
 
-	// Fallback to direct execution if no retry executor
-	_, err := operation(ctx)
+			// Fallback to direct execution if no retry executor
+			_, err := operation(ctx)
+			return err
+		})
+	} else {
+		if c.retryExecutor != nil {
+			_, err = retry.ExecuteWithRetryAndCircuitBreaker(ctx, c.retryExecutor.uploadPolicy, c.retryExecutor.circuitBreaker, operation)
+		} else {
+			// Fallback to direct execution if no retry executor
+			_, err = operation(ctx)
+		}
+	}
+	
+	duration := time.Since(startTime)
+	
+	// Record metrics if available
+	if c.metricsManager != nil {
+		c.metricsManager.RecordStorageOperation("upload", err == nil, duration)
+	}
+	
+	// Log operation
+	if c.logger != nil {
+		correlationID := observability.GetCorrelationID(ctx)
+		if err != nil {
+			c.logger.Error("S3 upload failed",
+				"bucket", c.bucket,
+				"key", key,
+				"duration_ms", duration.Milliseconds(),
+				"error", err.Error(),
+				"correlation_id", correlationID,
+			)
+		} else {
+			c.logger.Debug("S3 upload completed",
+				"bucket", c.bucket,
+				"key", key,
+				"size_bytes", len(data),
+				"duration_ms", duration.Milliseconds(),
+				"correlation_id", correlationID,
+			)
+		}
+	}
+	
 	return err
 }
 

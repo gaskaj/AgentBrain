@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 	
+	"github.com/agentbrain/agentbrain/internal/observability"
 	"github.com/agentbrain/agentbrain/internal/retry"
 )
 
@@ -24,11 +25,13 @@ const (
 
 // Client is a Salesforce HTTP client with OAuth, rate limiting, and retries.
 type Client struct {
-	httpClient     *http.Client
-	auth           AuthConfig
-	logger         *slog.Logger
-	retryPolicy    *retry.RetryPolicy
-	circuitBreaker *retry.CircuitBreaker
+	httpClient      *http.Client
+	auth            AuthConfig
+	logger          *slog.Logger
+	retryPolicy     *retry.RetryPolicy
+	circuitBreaker  *retry.CircuitBreaker
+	tracingManager  *observability.TracingManager
+	metricsManager  *observability.MetricsManager
 
 	mu          sync.RWMutex
 	accessToken string
@@ -70,6 +73,12 @@ func (c *Client) SetRetryPolicy(policy *retry.RetryPolicy) {
 // SetCircuitBreaker allows customizing the circuit breaker.
 func (c *Client) SetCircuitBreaker(cb *retry.CircuitBreaker) {
 	c.circuitBreaker = cb
+}
+
+// SetObservabilityManagers sets the observability managers for Salesforce operations.
+func (c *Client) SetObservabilityManagers(tracingManager *observability.TracingManager, metricsManager *observability.MetricsManager) {
+	c.tracingManager = tracingManager
+	c.metricsManager = metricsManager
 }
 
 // Authenticate performs the OAuth2 username-password flow.

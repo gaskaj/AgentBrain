@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 	
+	"github.com/agentbrain/agentbrain/internal/observability"
 	"github.com/agentbrain/agentbrain/internal/retry"
 )
 
@@ -26,6 +27,8 @@ type DeltaTable struct {
 	logger            *slog.Logger
 	retryPolicy       *retry.RetryPolicy
 	circuitBreaker    *retry.CircuitBreaker
+	tracingManager    *observability.TracingManager
+	metricsManager    *observability.MetricsManager
 }
 
 // NewDeltaTable creates a new DeltaTable manager.
@@ -226,6 +229,12 @@ func (t *DeltaTable) SetRetryPolicy(policy *retry.RetryPolicy) {
 // SetCircuitBreaker allows customizing the circuit breaker for Delta operations.
 func (t *DeltaTable) SetCircuitBreaker(cb *retry.CircuitBreaker) {
 	t.circuitBreaker = cb
+}
+
+// SetObservabilityManagers sets the observability managers for Delta operations.
+func (t *DeltaTable) SetObservabilityManagers(tracingManager *observability.TracingManager, metricsManager *observability.MetricsManager) {
+	t.tracingManager = tracingManager
+	t.metricsManager = metricsManager
 }
 
 // CreateBackup creates a backup of this table at the specified version
