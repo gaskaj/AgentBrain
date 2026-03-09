@@ -21,6 +21,7 @@ type Config struct {
 	Plugins    *PluginConfig                    `yaml:"plugins,omitempty"`
 	Retry      *RetryConfig                     `yaml:"retry,omitempty"`
 	Migration  *MigrationConfig                 `yaml:"migration,omitempty"`
+	Security   *SecurityConfig                  `yaml:"security,omitempty"`
 }
 
 type AgentConfig struct {
@@ -173,6 +174,67 @@ type CircuitBreakerConfig struct {
 	Enabled          bool          `yaml:"enabled"`
 }
 
+// SecurityConfig holds security framework configuration
+type SecurityConfig struct {
+	Enabled          bool                    `yaml:"enabled"`
+	StaticAnalysis   StaticAnalysisConfig    `yaml:"static_analysis"`
+	DependencyAudit  DependencyAuditConfig   `yaml:"dependency_audit"`
+	RuntimeMonitoring RuntimeMonitoringConfig `yaml:"runtime_monitoring"`
+	Encryption       EncryptionConfig        `yaml:"encryption"`
+}
+
+// StaticAnalysisConfig configures static security analysis
+type StaticAnalysisConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	FailOnHigh      bool     `yaml:"fail_on_high"`
+	SkipDirectories []string `yaml:"skip_directories"`
+	ExcludeRules    []string `yaml:"exclude_rules"`
+	CustomRules     []SecurityRule `yaml:"custom_rules"`
+}
+
+// DependencyAuditConfig configures dependency vulnerability scanning
+type DependencyAuditConfig struct {
+	Enabled          bool          `yaml:"enabled"`
+	FailOnHigh       bool          `yaml:"fail_on_high"`
+	CheckInterval    time.Duration `yaml:"check_interval"`
+	NotifyChannels   []string      `yaml:"notify_channels"`
+	MaxCVSSScore     float64       `yaml:"max_cvss_score"`
+	IgnorePackages   []string      `yaml:"ignore_packages"`
+}
+
+// RuntimeMonitoringConfig configures runtime security monitoring
+type RuntimeMonitoringConfig struct {
+	Enabled                   bool  `yaml:"enabled"`
+	AuthFailureThreshold      int   `yaml:"auth_failure_threshold"`
+	NetworkAnomalyDetection   bool  `yaml:"network_anomaly_detection"`
+	FileAccessMonitoring      bool  `yaml:"file_access_monitoring"`
+	MemoryAnomalyDetection    bool  `yaml:"memory_anomaly_detection"`
+	ProcessMonitoring         bool  `yaml:"process_monitoring"`
+	NetworkConnectionTracking bool  `yaml:"network_connection_tracking"`
+}
+
+// EncryptionConfig configures encryption requirements
+type EncryptionConfig struct {
+	EnforceTLS             bool   `yaml:"enforce_tls"`
+	MinTLSVersion          string `yaml:"min_tls_version"`
+	CredentialEncryption   bool   `yaml:"credential_encryption"`
+	DataAtRestEncryption   bool   `yaml:"data_at_rest_encryption"`
+	TransitEncryption      bool   `yaml:"transit_encryption"`
+}
+
+// SecurityRule represents a custom security rule
+type SecurityRule struct {
+	ID          string            `yaml:"id"`
+	Name        string            `yaml:"name"`
+	Description string            `yaml:"description"`
+	Pattern     string            `yaml:"pattern"`
+	Severity    string            `yaml:"severity"`
+	CWE         string            `yaml:"cwe,omitempty"`
+	Fix         string            `yaml:"fix,omitempty"`
+	Tags        []string          `yaml:"tags,omitempty"`
+	Metadata    map[string]string `yaml:"metadata,omitempty"`
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -305,6 +367,11 @@ func setDefaults(cfg *Config) {
 	// Set migration defaults if migration config is provided
 	if cfg.Migration != nil {
 		setMigrationDefaults(cfg.Migration)
+	}
+
+	// Set security defaults if security config is provided
+	if cfg.Security != nil {
+		setSecurityDefaults(cfg.Security)
 	}
 }
 
@@ -509,6 +576,35 @@ func setMigrationDefaults(mg *MigrationConfig) {
 	}
 }
 
+func setSecurityDefaults(sc *SecurityConfig) {
+	// Static analysis defaults
+	if sc.StaticAnalysis.Enabled && len(sc.StaticAnalysis.SkipDirectories) == 0 {
+		sc.StaticAnalysis.SkipDirectories = []string{"vendor", "node_modules", ".git"}
+	}
+
+	// Dependency audit defaults
+	if sc.DependencyAudit.Enabled {
+		if sc.DependencyAudit.CheckInterval <= 0 {
+			sc.DependencyAudit.CheckInterval = 24 * time.Hour
+		}
+		if sc.DependencyAudit.MaxCVSSScore <= 0 {
+			sc.DependencyAudit.MaxCVSSScore = 10.0 // No limit by default
+		}
+	}
+
+	// Runtime monitoring defaults
+	if sc.RuntimeMonitoring.Enabled {
+		if sc.RuntimeMonitoring.AuthFailureThreshold <= 0 {
+			sc.RuntimeMonitoring.AuthFailureThreshold = 5
+		}
+	}
+
+	// Encryption defaults
+	if sc.Encryption.MinTLSVersion == "" {
+		sc.Encryption.MinTLSVersion = "1.2"
+	}
+}
+
 func setErrorHandlingDefaults(eh *ErrorHandlingConfig) {
 	if eh.MaxRetries <= 0 {
 		eh.MaxRetries = 3
@@ -599,6 +695,84 @@ func validate(cfg *Config) error {
 			return fmt.Errorf("source %q: type is required", name)
 		}
 	}
+
+	// Validate security configuration if provided
+	if cfg.Security != nil {
+		if err := validateSecurityConfig(cfg.Security); err != nil {
+			return fmt.Errorf("security configuration invalid: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func validateSecurityConfig(sc *SecurityConfig) error {
+	// Validate custom security rules
+	for i, rule := range sc.StaticAnalysis.CustomRules {
+		if rule.ID == "" {
+			return fmt.Errorf("custom rule %d missing ID", i)
+		}
+		if rule.Name == "" {
+			return fmt.Errorf("custom rule %s missing name", rule.ID)
+		}
+		if rule.Pattern == "" {
+			return fmt.Errorf("custom rule %s missing pattern", rule.ID)
+		}
+		if rule.Severity == "" {
+			return fmt.Errorf("custom rule %s missing severity", rule.ID)
+		}
+
+		// Validate severity level
+		validSeverities := []string{"low", "medium", "high", "critical"}
+		validSeverity := false
+		for _, valid := range validSeverities {
+			if strings.ToLower(rule.Severity) == valid {
+				validSeverity = true
+				break
+			}
+		}
+		if !validSeverity {
+			return fmt.Errorf("custom rule %s has invalid severity %s", rule.ID, rule.Severity)
+		}
+
+		// Validate pattern as regular expression
+		if _, err := regexp.Compile(rule.Pattern); err != nil {
+			return fmt.Errorf("custom rule %s has invalid pattern: %w", rule.ID, err)
+		}
+	}
+
+	// Validate TLS version
+	if sc.Encryption.MinTLSVersion != "" {
+		validVersions := []string{"1.0", "1.1", "1.2", "1.3"}
+		valid := false
+		for _, version := range validVersions {
+			if sc.Encryption.MinTLSVersion == version {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid minimum TLS version: %s", sc.Encryption.MinTLSVersion)
+		}
+	}
+
+	// Validate dependency audit configuration
+	if sc.DependencyAudit.Enabled {
+		if sc.DependencyAudit.MaxCVSSScore < 0 || sc.DependencyAudit.MaxCVSSScore > 10 {
+			return fmt.Errorf("max_cvss_score must be between 0 and 10")
+		}
+		if sc.DependencyAudit.CheckInterval <= 0 {
+			return fmt.Errorf("check_interval must be positive")
+		}
+	}
+
+	// Validate runtime monitoring configuration
+	if sc.RuntimeMonitoring.Enabled {
+		if sc.RuntimeMonitoring.AuthFailureThreshold < 0 {
+			return fmt.Errorf("auth_failure_threshold must be non-negative")
+		}
+	}
+
 	return nil
 }
 

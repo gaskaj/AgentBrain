@@ -22,7 +22,9 @@ make build
 ```bash
 make test          # Unit tests with -race
 make test-cover    # Coverage report → coverage.html
+make test-security # Security-specific tests
 make lint          # Static analysis
+make security-scan # Comprehensive security scanning
 ```
 
 ### Local Development with LocalStack
@@ -379,3 +381,128 @@ Add new dependencies deliberately. The current stack:
 | `stretchr/testify` | Test assertions |
 
 Avoid adding dependencies for functionality that can be implemented in < 50 lines of Go. Prefer standard library where practical.
+
+## Security Requirements
+
+All contributions must pass security review and adhere to secure coding practices.
+
+### Security Guidelines
+
+1. **No Hardcoded Secrets**: Use environment variables for all sensitive configuration
+2. **Input Validation**: Validate and sanitize all external inputs
+3. **Secure Defaults**: Configure secure defaults for all options
+4. **Error Handling**: Avoid information leakage in error messages
+5. **Authentication**: Implement proper authorization checks
+6. **Encryption**: Use TLS for network communication and encrypt sensitive data
+
+### Security Tools
+
+Install required security tools:
+
+```bash
+# Install security scanning tools
+make security-install
+
+# Or install manually
+go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+go install golang.org/x/vuln/cmd/govulncheck@latest
+```
+
+### Pre-Commit Security Checks
+
+Run security checks before committing:
+
+```bash
+# Comprehensive security scan
+make security-scan
+
+# Individual tools
+gosec ./...                    # Static analysis
+govulncheck ./...              # Vulnerability scanning
+make test-security             # Security tests
+```
+
+### Security Review Checklist
+
+Before submitting pull requests, verify:
+
+- [ ] No hardcoded credentials, API keys, or passwords
+- [ ] All external inputs are validated and sanitized
+- [ ] Error handling doesn't leak sensitive information
+- [ ] Network communications use TLS/encryption
+- [ ] Dependencies are up-to-date with no known vulnerabilities
+- [ ] Proper authorization checks for sensitive operations
+- [ ] Security tests cover new functionality
+- [ ] Configuration uses secure defaults
+
+### Common Security Issues to Avoid
+
+**Credential Exposure**:
+```go
+// ❌ DON'T: Hardcode credentials
+const apiKey = "sk-abc123..."
+
+// ✅ DO: Use environment variables
+apiKey := os.Getenv("API_KEY")
+```
+
+**Input Validation**:
+```go
+// ❌ DON'T: Direct SQL construction
+query := fmt.Sprintf("SELECT * FROM users WHERE id = %s", userID)
+
+// ✅ DO: Use parameterized queries or validation
+query := "SELECT * FROM users WHERE id = ?"
+```
+
+**Error Information Leakage**:
+```go
+// ❌ DON'T: Expose internal details
+return fmt.Errorf("database connection failed: %v", dbError)
+
+// ✅ DO: Use generic error messages
+return fmt.Errorf("authentication failed")
+```
+
+**Insecure Network Communication**:
+```go
+// ❌ DON'T: Use HTTP for sensitive data
+client := &http.Client{}
+
+// ✅ DO: Enforce HTTPS and proper TLS
+client := &http.Client{
+    Transport: &http.Transport{
+        TLSClientConfig: &tls.Config{
+            MinVersion: tls.VersionTLS12,
+        },
+    },
+}
+```
+
+### Security Documentation
+
+When adding security-related features:
+
+1. Document security implications in code comments
+2. Update security configuration documentation
+3. Add security considerations to relevant guides
+4. Include security test cases
+5. Update threat model if applicable
+
+### Incident Response
+
+If you discover a security vulnerability:
+
+1. **Do not** create a public GitHub issue
+2. Email security@agentbrain.com with details
+3. Include steps to reproduce and impact assessment
+4. Allow time for coordinated disclosure
+
+### Security Training
+
+All contributors should be familiar with:
+
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [Go Security Checklist](https://github.com/Checkmarx/Go-SCP)
+- [Secure Coding Practices](https://owasp.org/www-project-secure-coding-practices-quick-reference-guide/)
+- [Common Weakness Enumeration (CWE)](https://cwe.mitre.org/)
